@@ -101,11 +101,29 @@ end
 
 -- ─── Lua source code builder ───────────────────────────────────────────────────
 
--- Emit a byte-array literal as a Lua string using \NNN escapes.
-local function bytes_lit(data)
+-- Emit a byte-array as a Lua string literal using \NNN escapes (no quotes).
+local function bytes_esc(data)
     local t = {}
     for i = 1, #data do t[i] = string.format("\\%d", data:byte(i)) end
-    return '"' .. table.concat(t) .. '"'
+    return table.concat(t)
+end
+
+-- Emit the encrypted blob as a chunked table matching the superflow_bytecode
+-- style from reference implementations.  Each entry is a \NNN-escaped string
+-- of at most CHUNK_SIZE bytes so the output stays readable and mirrors the
+-- reference obfuscator's layout.
+local CHUNK_SIZE = 200
+local function emit_payload_table(data, tbl_name)
+    local parts = {}
+    parts[#parts+1] = "local " .. tbl_name .. "={\n"
+    local i = 1
+    while i <= #data do
+        local chunk = data:sub(i, i + CHUNK_SIZE - 1)
+        parts[#parts+1] = '  "' .. bytes_esc(chunk) .. '",\n'
+        i = i + CHUNK_SIZE
+    end
+    parts[#parts+1] = "}\n"
+    return table.concat(parts)
 end
 
 -- Emit an integer as a Lua numeric literal (optionally obfuscated).
@@ -204,8 +222,16 @@ function VmGen.generate(proto, revmap, key, utils)
     local jA        = vn()
     local jB        = vn()
     local jC        = vn()
+    -- anti-tamper names
+    local atPayload = vn()   -- catify_payload table name
+    local atCrc     = vn()   -- expected CRC variable
+    local atCalc    = vn()   -- computed CRC variable
+    local atDbg     = vn()   -- debug reference
 
-    -- ── 3. Build the revmap literal ─────────────────────────────────────────
+    -- ── 3. Compute CRC32 of the encrypted blob for anti-tamper ──────────────
+    local blob_crc = utils.crc32(blob)
+
+    -- ── 4. Build the revmap literal ─────────────────────────────────────────
     local revmap_parts = {}
     for shuffled = 0, 46 do
         revmap_parts[#revmap_parts+1] = string.format("[%d]=%d", shuffled, revmap[shuffled] or shuffled)
@@ -363,8 +389,9 @@ function VmGen.generate(proto, revmap, key, utils)
     -- LOADNIL
     LF("      elseif %s==4 then for %s=%s,%s+%s do %s[%s].v=nil end",
        eState, eI, eA, eA, eB, eRegs, eI)
-    -- GETUPVAL
-    LF("      elseif %s==5 then %s[%s].v=%s[%s].v",    eState, eRegs, eA, eUpvals, eB)
+    -- GETUPVAL: defensive access – if upvals[B] is nil return nil (don't error)
+    LF("      elseif %s==5 then local _uv=%s[%s];%s[%s].v=_uv and _uv.v or nil",
+       eState, eUpvals, eB, eRegs, eA)
     -- GETTABUP
     LF("      elseif %s==6 then %s[%s].v=%s[%s].v[%s(%s)]",
        eState, eRegs, eA, eUpvals, eB, eRk, eC)
@@ -482,14 +509,14 @@ function VmGen.generate(proto, revmap, key, utils)
     LF("        local %s=%s==0 and %s-%s or %s", eNelem, eB, eTop, eA, eB)
     LF("        for %s=1,%s do %s[%s].v[%s+%s]=%s[%s+%s].v end",
        eI, eNelem, eRegs, eA, eOffset, eI, eRegs, eA, eI)
-    -- CLOSURE
+    -- CLOSURE: build suvs defensively (nil upvals become empty boxes)
     LF("      elseif %s==44 then", eState)
     LF("        local %s=%s[%s]", eSub, eProtos, eBx)
     LF("        local %s={}", eSuvs)
     LF("        for %s=0,%s.sizeupvalues-1 do", eI, eSub)
     LF("          local %s=%s.upvals[%s]", eUv, eSub, eI)
     LF("          if %s.instack==1 then %s[%s]=%s[%s.idx]", eUv, eSuvs, eI, eRegs, eUv)
-    LF("          else %s[%s]=%s[%s.idx] end", eSuvs, eI, eUpvals, eUv)
+    LF("          else local _u=%s[%s.idx];%s[%s]=_u or {} end", eUpvals, eUv, eSuvs, eI)
     LF("        end")
     LF("        local cap_%s,%s_sv=%s,%s", eI, eI, eSuvs, eBx)
     LF("        %s[%s].v=function(...) return %s(%s[%s_sv],cap_%s,...) end",
@@ -510,21 +537,58 @@ function VmGen.generate(proto, revmap, key, utils)
     LF("  end")
     LF("end")  -- end execute function
 
-    -- ── Main: decrypt, deserialize, run ─────────────────────────────────────
-    LF("local %s=%s", vKey,  bytes_lit(key))
-    LF("local %s=%s", vBlob, bytes_lit(blob))
+    -- ── Main: emit payload, anti-tamper, decrypt, deserialize, run ──────────
+    -- Chunked encrypted payload table (mirrors superflow_bytecode format)
+    src[#src+1] = emit_payload_table(blob, atPayload)
+
+    -- RC4 key
+    LF("local %s=\"%s\"", vKey, bytes_esc(key))
+
+    -- Anti-tamper 1: CRC32 integrity check of the encrypted blob
+    -- Inline CRC32 (so we don't depend on external functions at runtime)
+    LF("local function _crc32_(s)")
+    LF("  local _t={}")
+    LF("  for _i=0,255 do")
+    LF("    local _c=_i")
+    LF("    for _=1,8 do if _c&1~=0 then _c=0xEDB88320~(_c>>1) else _c=_c>>1 end end")
+    LF("    _t[_i]=_c")
+    LF("  end")
+    LF("  local _r=0xFFFFFFFF")
+    LF("  for _i=1,#s do _r=_t[(_r~s:byte(_i))&0xFF]~(_r>>8) end")
+    LF("  return _r~0xFFFFFFFF")
+    LF("end")
+    -- Compute expected CRC and verify
+    LF("local %s=%s", atCrc, tostring(blob_crc))
+    LF("local %s=table.concat(%s)", vBlob, atPayload)
+    LF("%s=nil", atPayload)   -- wipe payload table after concat
+    LF("local %s=_crc32_(%s)", atCalc, vBlob)
+    LF("if %s~=%s then error('Catify: integrity check failed',0) end", atCalc, atCrc)
+
+    -- Anti-tamper 2: debug hook detection
+    LF("local %s=rawget(_ENV,'debug')", atDbg)
+    LF("if %s and type(%s.gethook)=='function' then", atDbg, atDbg)
+    LF("  if %s.gethook()~=nil then error('Catify: debug hook detected',0) end", atDbg)
+    LF("end")
+
+    -- Anti-tamper 3: critical global integrity check
+    LF("do")
+    LF("  local _req={tostring=tostring,type=type,pcall=pcall,load=load,string=string,table=table}")
+    LF("  for _k,_v in pairs(_req) do")
+    LF("    if _v==nil then error('Catify: environment tampered ('.._k..')',0) end")
+    LF("  end")
+    LF("end")
+
+    -- Decrypt and deserialize
     LF("%s=%s(%s,%s)", vBlob, vDecrypt, vBlob, vKey)
+    LF("%s=nil;%s=nil", vKey, vDecrypt)   -- wipe key and decryptor
     LF("%s=1", dPos)
     LF("%s=%s", dData, vBlob)
     LF("local %s=%s()", vProto, vLoadProto)
+    LF("%s=nil;%s=nil;%s=nil", vBlob, dData, vLoadProto)  -- wipe after load
     LF("local %s={v=_ENV}", vEnv)
-
-    -- Fix the CLOSURE handler: it uses eProtos which is a local inside vExec.
-    -- We need to call vExec with the top-level proto, so the proto tree is
-    -- self-contained inside the proto table. This is already handled correctly
-    -- since vExec references eProtos = eProto.p.
-
-    LF("%s(%s,{[0]=%s})", vExec, vProto, vEnv)
+    -- Initial upvals table uses a metatable so any upval[N] always returns a box
+    LF("%s(%s,setmetatable({[0]=%s},{__index=function(t,k)local b={};t[k]=b;return b end}))",
+       vExec, vProto, vEnv)
     L("end")
 
     return table.concat(src)

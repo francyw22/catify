@@ -201,6 +201,33 @@ function Utils.obfuscate_int(n)
     end
 end
 
+-- ─── CRC32 (IEEE 802.3) ───────────────────────────────────────────────────────
+
+local _CRC32_TABLE = (function()
+    local t = {}
+    for i = 0, 255 do
+        local c = i
+        for _ = 1, 8 do
+            if c & 1 ~= 0 then c = 0xEDB88320 ~ (c >> 1)
+            else                c = c >> 1
+            end
+        end
+        t[i] = c
+    end
+    return t
+end)()
+
+--- Compute CRC32 (ISO 3309 / IEEE 802.3) of a byte string.
+---@param data string
+---@return integer  unsigned 32-bit CRC
+function Utils.crc32(data)
+    local crc = 0xFFFFFFFF
+    for i = 1, #data do
+        crc = _CRC32_TABLE[(crc ~ data:byte(i)) & 0xFF] ~ (crc >> 8)
+    end
+    return crc ~ 0xFFFFFFFF
+end
+
 -- ─── Base64 (for readable output variant) ────────────────────────────────────
 
 local B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
