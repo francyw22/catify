@@ -112,17 +112,21 @@ end
 -- style from reference implementations.  Each entry is a \NNN-escaped string
 -- of at most CHUNK_SIZE bytes so the output stays readable and mirrors the
 -- reference obfuscator's layout.
+-- The table name is always the literal "superflow_bytecode" (global, no local)
+-- so it matches the reference format exactly.
 local CHUNK_SIZE = 200
-local function emit_payload_table(data, tbl_name)
+local PAYLOAD_TABLE_NAME = "superflow_bytecode"
+local function emit_payload_table(data)
     local parts = {}
-    parts[#parts+1] = "local " .. tbl_name .. "={\n"
+    parts[#parts+1] = PAYLOAD_TABLE_NAME .. "={"
     local i = 1
     while i <= #data do
         local chunk = data:sub(i, i + CHUNK_SIZE - 1)
-        parts[#parts+1] = '  "' .. bytes_esc(chunk) .. '",\n'
+        if i > 1 then parts[#parts+1] = "," end
+        parts[#parts+1] = '"' .. bytes_esc(chunk) .. '"'
         i = i + CHUNK_SIZE
     end
-    parts[#parts+1] = "}\n"
+    parts[#parts+1] = "};"
     return table.concat(parts)
 end
 
@@ -222,8 +226,7 @@ function VmGen.generate(proto, revmap, key, utils)
     local jA        = vn()
     local jB        = vn()
     local jC        = vn()
-    -- anti-tamper names
-    local atPayload = vn()   -- catify_payload table name
+    -- anti-tamper names (atPayload is now the fixed string "superflow_bytecode")
     local atCrc     = vn()   -- expected CRC variable
     local atCalc    = vn()   -- computed CRC variable
     local atDbg     = vn()   -- debug reference
@@ -254,12 +257,17 @@ function VmGen.generate(proto, revmap, key, utils)
     local function L(s) src[#src+1] = s .. "\n" end
     local function LF(fmt, ...) L(string.format(fmt, ...)) end
 
-    -- Header comment (obfuscated watermark)
-    L("-- [Catify] Protected Script – do not edit")
+    -- ── Header comment matching reference obfuscator style ───────────────────
+    L("--[[\n\tCatify — Lua Script Protector\n\thttps://github.com/francyw22/catempire\n]]")
+
+    -- ── Chunked payload table at the top (reference style: global assignment) ─
+    -- This is emitted first so it matches the reference's `superflow_bytecode={...}`
+    -- layout exactly: the table is defined before the VM runtime code.
+    src[#src+1] = emit_payload_table(blob) .. "\n"
+
+    -- Wrap all VM internals in a do...end block so locals don't pollute global scope
     L("do")
     L("local _=tostring;local __=type;local ___=pcall;local ____=load")
-
-    -- RC4 decrypt function
     LF("local function %s(%s,%s)", vDecrypt, rc4D, rc4K)
     LF("  local %s={}",          rc4S)
     LF("  for %s=0,255 do %s[%s]=%s end", rc4I, rc4S, rc4I, rc4I)
@@ -537,9 +545,8 @@ function VmGen.generate(proto, revmap, key, utils)
     LF("  end")
     LF("end")  -- end execute function
 
-    -- ── Main: emit payload, anti-tamper, decrypt, deserialize, run ──────────
-    -- Chunked encrypted payload table (mirrors superflow_bytecode format)
-    src[#src+1] = emit_payload_table(blob, atPayload)
+    -- ── Main: anti-tamper, decrypt, deserialize, run ──────────
+    -- The payload table (superflow_bytecode) was already emitted at the top of the file.
 
     -- RC4 key
     LF("local %s=\"%s\"", vKey, bytes_esc(key))
@@ -559,8 +566,8 @@ function VmGen.generate(proto, revmap, key, utils)
     LF("end")
     -- Compute expected CRC and verify
     LF("local %s=%s", atCrc, tostring(blob_crc))
-    LF("local %s=table.concat(%s)", vBlob, atPayload)
-    LF("%s=nil", atPayload)   -- wipe payload table after concat
+    LF("local %s=table.concat(%s)", vBlob, PAYLOAD_TABLE_NAME)
+    LF("%s=nil", PAYLOAD_TABLE_NAME)   -- wipe payload table after concat
     LF("local %s=_crc32_(%s)", atCalc, vBlob)
     LF("if %s~=%s then error('Catify: integrity check failed',0) end", atCalc, atCrc)
 
