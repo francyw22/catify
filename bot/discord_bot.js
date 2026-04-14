@@ -223,9 +223,7 @@ client.on("messageCreate", async (message) => {
 
         const ratio = (result.length / Math.max(1, source.length)).toFixed(1);
         await message.reply({
-            content:
-                `✅ Script protected! (${source.length} → ${result.length} bytes, ${ratio}×)\n` +
-                "**Protections:** opcode shuffle · RC4 encryption · CRC-32 · debug-hook detection · env check",
+            content: "Obfuscated successfully",
             files: [new AttachmentBuilder(Buffer.from(result, "utf8"), { name: attachment.name })],
         });
         return;
@@ -262,12 +260,10 @@ client.on("messageCreate", async (message) => {
     const ratio = (result.length / Math.max(1, source.length)).toFixed(1);
 
     if (result.length <= 1900) {
-        await message.reply("✅ Protected!\n```lua\n" + result + "\n```");
+        await message.reply("Obfuscated successfully\n```lua\n" + result + "\n```");
     } else {
         await message.reply({
-            content:
-                `✅ Script protected! (${source.length} → ${result.length} bytes, ${ratio}×)\n` +
-                "**Protections:** opcode shuffle · RC4 · CRC-32 · anti-debug · env check",
+            content: "Obfuscated successfully",
             files: [new AttachmentBuilder(Buffer.from(result, "utf8"), { name: "catified.lua" })],
         });
     }
