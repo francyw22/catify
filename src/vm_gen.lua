@@ -128,17 +128,13 @@ local function bytes_esc(data)
     return table.concat(t)
 end
 
--- Emit the encrypted blob as a chunked table matching the superflow_bytecode
--- style from reference implementations.  Each entry is a \NNN-escaped string
--- of at most CHUNK_SIZE bytes so the output stays readable and mirrors the
--- reference obfuscator's layout.
--- The table name is always the literal "superflow_bytecode" (global, no local)
--- so it matches the reference format exactly.
+-- Emit the encrypted blob as a chunked table.  Each entry is a \NNN-escaped
+-- string of at most CHUNK_SIZE bytes.  The table name is a random local
+-- variable generated per obfuscation session so it carries no fixed fingerprint.
 local CHUNK_SIZE = 200
-local PAYLOAD_TABLE_NAME = "superflow_bytecode"
-local function emit_payload_table(data)
+local function emit_payload_table(data, tname)
     local parts = {}
-    parts[#parts+1] = PAYLOAD_TABLE_NAME .. "={"
+    parts[#parts+1] = "local " .. tname .. "={"
     local i = 1
     while i <= #data do
         local chunk = data:sub(i, i + CHUNK_SIZE - 1)
@@ -185,6 +181,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local vDecrypt  = vn()   -- RC4 decrypt function
     local vKey      = vn()   -- RC4 key string
     local vBlob     = vn()   -- encrypted bytecode blob
+    local vPayload  = vn()   -- name for the payload table (random per session)
     local vProto    = vn()   -- top-level proto after deserialization
     local vEnv      = vn()   -- _ENV box
 
@@ -254,7 +251,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local eStep     = vn()
     local eI        = vn()
     local eT        = vn()
-    -- anti-tamper names (atPayload is now the fixed string "superflow_bytecode")
+    -- anti-tamper names
     local atCrc     = vn()   -- expected CRC variable
     local atCalc    = vn()   -- computed CRC variable
     local atDbg     = vn()   -- debug reference
@@ -450,7 +447,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- (intentionally omitted for compact output)
 
     -- ── Chunked \NNN-escaped payload table at the top (emitted before do block) ──
-    src[#src+1] = emit_payload_table(blob) .. "\n"
+    src[#src+1] = emit_payload_table(blob, vPayload) .. "\n"
 
     -- Wrap all VM internals in a do...end block so locals don't pollute global scope
     L("do")
@@ -458,7 +455,11 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Junk block at top of do-scope (dead computations, not reachable by any real code path)
     src[#src+1] = junk_block("", math.random(2, 4))
     -- ── Emit payload concatenation helper (decoy wrapper using allocated names) ──
-    LF("local %s=%q", b91Alpha, "catify")
+    do
+        local _rsc = {}
+        for _ri = 1, 6 do _rsc[_ri] = string.char(math.random(97, 122)) end
+        LF("local %s=%q", b91Alpha, table.concat(_rsc))
+    end
     LF("local function %s(%s) local %s={} for _i=1,#%s do %s[_i]=%s[_i] end return table.concat(%s) end",
        b91Dec, b91I, b91Out, b91I, b91Out, b91I, b91Out)
     -- (b91Tbl, b91V, b91B, b91N_, b91P consume name-pool slots; used as junk locals below)
@@ -867,7 +868,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     src[#src+1] = junk_block("", math.random(2, 4))
 
     -- ── Main: anti-tamper, decrypt, deserialize, run ──────────
-    -- The payload table (superflow_bytecode) was already emitted at the top of the file.
+    -- The payload table was already emitted at the top of the file as a local.
 
     -- AES key + nonce (use \NNN decimal escapes to avoid %q newline-embedding issue)
     LF("local %s=\"%s\"", vKey, bytes_esc(key))
@@ -912,8 +913,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("  local _out={};for _i=1,8 do _out[_i]=string.pack('>I4',%s[_i]) end;return table.concat(_out)", shaH)
     LF("end")
     -- Decode payload table into vBlob (simple concatenation of \NNN-escaped chunks)
-    LF("local %s=table.concat(%s)", vBlob, PAYLOAD_TABLE_NAME)
-    LF("%s=nil", PAYLOAD_TABLE_NAME)   -- wipe payload table after reading
+    LF("local %s=table.concat(%s)", vBlob, vPayload)
+    LF("%s=nil", vPayload)   -- wipe payload table after reading
     -- SHA-256 integrity check: compute hash and compare 8 words
     LF("local %s=%s(%s)", atSha, shaFn, vBlob)
     local sha_checks = {}
@@ -921,80 +922,80 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         local word_exp = utils.obfuscate_int_deep(blob_sha_words[i])
         sha_checks[i+1] = string.format("(string.unpack('>I4',%s,%d)~=%s)", atSha, i*4+1, word_exp)
     end
-    LF("if %s then error('Catify: integrity check failed',0) end", table.concat(sha_checks, " or "))
+    LF("if %s then error(0,0) end", table.concat(sha_checks, " or "))
 
     -- Anti-tamper 2: debug hook detection (wrapped in pcall for Roblox compatibility)
     LF("local %s", atDbg)
     LF("pcall(function() %s=rawget(_ENV,'debug') end)", atDbg)
     LF("if %s and type(%s)=='table' and type(%s.gethook)=='function' then", atDbg, atDbg, atDbg)
     LF("  local _dhok,_dhv=pcall(%s.gethook,%s)", atDbg, atDbg)
-    LF("  if _dhok and _dhv~=nil then error('Catify: debug hook detected',0) end")
+    LF("  if _dhok and _dhv~=nil then error(0,0) end")
     LF("end")
 
     -- Anti-tamper 3: critical global integrity check
     LF("do")
     LF("  local _req={tostring=tostring,type=type,pcall=pcall,load=load,string=string,table=table}")
     LF("  for _k,_v in pairs(_req) do")
-    LF("    if _v==nil then error('Catify: environment tampered ('.._k..')',0) end")
+    LF("    if _v==nil then error(0,0) end")
     LF("  end")
     LF("end")
 
     -- Anti-tamper 4: Lua version must be 5.3, 5.4, or Roblox Luau
-    LF("do local %s=_VERSION;if not(%s and(%s:find('5%%.3') or %s:find('5%%.4') or %s:find('Luau')))then error('Catify: unsupported Lua version',0) end end",
+    LF("do local %s=_VERSION;if not(%s and(%s:find('5%%.3') or %s:find('5%%.4') or %s:find('Luau')))then error(0,0) end end",
        atVer, atVer, atVer, atVer, atVer)
 
     -- Anti-tamper 5: core standard functions must be genuine callable values
-    LF("do local %s={rawequal,rawget,rawset,rawlen,select,ipairs,pairs,next,table.unpack or unpack};for _,_f in ipairs(%s) do if type(_f)~='function' then error('Catify: environment tampered (core)',0) end end end",
+    LF("do local %s={rawequal,rawget,rawset,rawlen,select,ipairs,pairs,next,table.unpack or unpack};for _,_f in ipairs(%s) do if type(_f)~='function' then error(0,0) end end end",
        atRaw, atRaw)
 
     -- Anti-tamper 6: type() sanity (standard type names must not be overridden)
     if math.random(1, 2) == 1 then
-        LF("do if type(nil)~='nil' or type(0)~='number' or type('')~='string' or type({})~='table' or type(type)~='function' then error('Catify: environment tampered (type)',0) end end")
+        LF("do if type(nil)~='nil' or type(0)~='number' or type('')~='string' or type({})~='table' or type(type)~='function' then error(0,0) end end")
     end
 
     -- Anti-tamper 7: string standard library sanity
-    LF("do if string.byte('A')~=65 or string.char(65)~='A' or string.len('ab')~=2 then error('Catify: environment tampered (strlib)',0) end end")
+    LF("do if string.byte('A')~=65 or string.char(65)~='A' or string.len('ab')~=2 then error(0,0) end end")
 
     -- Anti-tamper 8: math library sanity (math.pi is universal; maxinteger absent in Luau)
     if math.random(1, 2) == 1 then
-        LF("do if type(math.pi)~='number' or math.pi<=3 or math.pi>=4 or type(math.abs)~='function' then error('Catify: environment tampered (math)',0) end end")
+        LF("do if type(math.pi)~='number' or math.pi<=3 or math.pi>=4 or type(math.abs)~='function' then error(0,0) end end")
     end
 
     -- Anti-tamper 9: table library sanity (insert/remove must be callable)
     if math.random(1, 2) == 1 then
-        LF("do if type(table.insert)~='function' or type(table.remove)~='function' or type(table.concat)~='function' then error('Catify: environment tampered (tablelib)',0) end end")
+        LF("do if type(table.insert)~='function' or type(table.remove)~='function' or type(table.concat)~='function' then error(0,0) end end")
     end
 
     -- Anti-tamper 10: coroutine library basic check
     if math.random(1, 2) == 1 then
-        LF("do if type(coroutine)~='table' or type(coroutine.wrap)~='function' then error('Catify: environment tampered (coroutine)',0) end end")
+        LF("do if type(coroutine)~='table' or type(coroutine.wrap)~='function' then error(0,0) end end")
     end
 
     -- Anti-keylogger 1: no active debug hook (more thorough check)
     LF("do local %s", atKl1)
     LF("  pcall(function() local _d=rawget(_ENV,'debug');if _d and type(_d.gethook)=='function' then %s=_d.gethook() end end)", atKl1)
-    LF("  if %s~=nil then error('Catify: keylogger detected',0) end end", atKl1)
+    LF("  if %s~=nil then error(0,0) end end", atKl1)
 
     -- Anti-keylogger 2: io library integrity (keyloggers may replace io.read/write)
     -- io is nil in Roblox, so the nil guard makes this a no-op there.
     if math.random(1, 2) == 1 then
-        LF("do local %s=rawget(_ENV,'io');if %s~=nil and(type(%s.read)~='function' or type(%s.write)~='function')then error('Catify: keylogger detected (io)',0)end end",
+        LF("do local %s=rawget(_ENV,'io');if %s~=nil and(type(%s.read)~='function' or type(%s.write)~='function')then error(0,0)end end",
            atKl2, atKl2, atKl2, atKl2)
     end
 
     -- Anti-keylogger 3: string metatable not tampered
     if math.random(1, 2) == 1 then
-        LF("do local %s=getmetatable('');if %s~=nil then local _idx=rawget(%s,'__index');if _idx~=nil and type(_idx)~='table' then error('Catify: keylogger detected (strmeta)',0)end end end",
+        LF("do local %s=getmetatable('');if %s~=nil then local _idx=rawget(%s,'__index');if _idx~=nil and type(_idx)~='table' then error(0,0)end end end",
            atKl3, atKl3, atKl3)
     end
 
     -- Anti-keylogger 4: pcall/error uncompromised
-    LF("do local %s,_r=pcall(function()return true end);if not %s or _r~=true then error('Catify: keylogger detected (pcall)',0)end end",
+    LF("do local %s,_r=pcall(function()return true end);if not %s or _r~=true then error(0,0)end end",
        atKl4, atKl4)
 
     -- Anti-environmental logger 1: detect _G/_ENV monitoring via metamethod proxy
     if math.random(1, 2) == 1 then
-        LF("do local %s=getmetatable(_G or _ENV);if %s~=nil then if rawget(%s,'__newindex')~=nil or rawget(%s,'__index')~=nil then error('Catify: env logger detected',0)end end end",
+        LF("do local %s=getmetatable(_G or _ENV);if %s~=nil then if rawget(%s,'__newindex')~=nil or rawget(%s,'__index')~=nil then error(0,0)end end end",
            atEnv1, atEnv1, atEnv1, atEnv1)
     end
 
@@ -1002,13 +1003,13 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Roblox has os.time and os.clock but NOT os.getenv, so we only check
     -- the two functions that are guaranteed to exist on all supported platforms.
     if math.random(1, 2) == 1 then
-        LF("do local %s=rawget(_ENV,'os');if %s~=nil then if type(%s.time)~='function' or type(%s.clock)~='function' then error('Catify: env tampered (os)',0)end end end",
+        LF("do local %s=rawget(_ENV,'os');if %s~=nil then if type(%s.time)~='function' or type(%s.clock)~='function' then error(0,0)end end end",
            atEnv2, atEnv2, atEnv2, atEnv2)
     end
 
     -- Anti-environmental logger 3: numbers must not have a metatable (some loggers patch this)
     if math.random(1, 2) == 1 then
-        LF("do local %s=getmetatable(0);if %s~=nil then error('Catify: env logger detected (nummt)',0)end end",
+        LF("do local %s=getmetatable(0);if %s~=nil then error(0,0)end end",
            atEnv3, atEnv3)
     end
 
@@ -1044,14 +1045,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
             compact_lines[#compact_lines + 1] = trimmed
         end
     end
-    -- Prepend ASCII watermark as a block comment at the top of the output file
-    local watermark = "--[[\n"
-        .. "   /\\_/\\  \n"
-        .. "  ( o.o ) \n"
-        .. "   > ^ <  \n"
-        .. "  Catify v2.0.0 -- Protected by Catify\n"
-        .. "]]\n"
-    return watermark .. table.concat(compact_lines, " ")
+    return table.concat(compact_lines, " ")
 end
 
 return VmGen

@@ -111,7 +111,7 @@ function Passes.strip_debug(proto)
     local np = clone_proto(proto)
 
     local function strip(p)
-        p.source       = "@Catify"
+        p.source       = "@"
         p.linedefined  = 0
         p.lastlinedefined = 0
         -- Wipe line-info array
