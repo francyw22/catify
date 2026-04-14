@@ -237,55 +237,93 @@ function Utils.obfuscate_int(n)
 end
 
 --- Return a complex multi-layer Lua expression that evaluates to integer n.
---- Uses XOR-split encoding (a ~ (a ~ n) == n) with optional additive noise
---- chosen from several patterns so the structure varies per call.
----@param n integer  (any Lua integer, including large unsigned 32-bit values)
----@return string    Lua expression string
-function Utils.obfuscate_int_deep(n)
+--- Uses XOR-split encoding (a XOR b == n) with optional additive noise.
+--- When xorname is provided the XOR is expressed as a function call (compatible
+--- with all Lua versions including Luau/Lua 5.1).  When omitted the XOR is
+--- pre-computed at generator time and only arithmetic noise is added.
+---@param n       integer  (any Lua integer, including large unsigned 32-bit values)
+---@param xorname string?  name of the runtime XOR function to call (e.g. the bXor variable)
+---@return string          Lua expression string
+function Utils.obfuscate_int_deep(n, xorname)
     -- XOR split: let a = random, b = a XOR n → a XOR b == n
     local a = math.random(0, 0x3FFFFFFF)
-    local b = a ~ n
+    local b = a ~ n   -- computed at generator time (generator runs Lua 5.3)
     local form = math.random(1, 4)
-    if form == 1 then
-        -- No noise: bare XOR pair
-        return string.format("(%d~%d)", a, b)
-    elseif form == 2 then
-        -- Noise inside second operand: a ~ (b + p - p)
-        local p = math.random(1, 0x7FFF)
-        return string.format("(%d~(%d+%d-%d))", a, b, p, p)
-    elseif form == 3 then
-        -- Noise around result: (a ~ b) + p - p
-        local p = math.random(1, 0x7FFF)
-        return string.format("((%d~%d)+%d-%d)", a, b, p, p)
+    if xorname then
+        -- Emit function-call syntax so the output is valid in all Lua versions
+        if form == 1 then
+            -- No noise: bare XOR pair
+            return string.format("(%s(%d,%d))", xorname, a, b)
+        elseif form == 2 then
+            -- Noise inside second operand: xor(a, b+p-p)
+            local p = math.random(1, 0x7FFF)
+            return string.format("(%s(%d,(%d+%d-%d)))", xorname, a, b, p, p)
+        elseif form == 3 then
+            -- Noise around result: xor(a,b)+p-p
+            local p = math.random(1, 0x7FFF)
+            return string.format("((%s(%d,%d))+%d-%d)", xorname, a, b, p, p)
+        else
+            -- Double-cancel noise: xor(a,b)+p+q-p-q
+            local p = math.random(1, 0x7FFF)
+            local q = math.random(1, 0x7FFF)
+            return string.format("((%s(%d,%d))+%d+%d-%d-%d)", xorname, a, b, p, q, p, q)
+        end
     else
-        -- Double-cancel noise: (a ~ b) + p + q - p - q
-        local p = math.random(1, 0x7FFF)
-        local q = math.random(1, 0x7FFF)
-        return string.format("((%d~%d)+%d+%d-%d-%d)", a, b, p, q, p, q)
+        -- No xorname: pre-compute XOR and use arithmetic-only noise
+        local result = n  -- a ~ b == n
+        if form == 1 then
+            return tostring(result)
+        elseif form == 2 then
+            local p = math.random(1, 0x7FFF)
+            return string.format("(%d+%d-%d)", result, p, p)
+        elseif form == 3 then
+            local p = math.random(1, 0x7FFF)
+            return string.format("(%d-%d+%d)", result, p, p)
+        else
+            local p = math.random(1, 0x7FFF)
+            local q = math.random(1, 0x7FFF)
+            return string.format("(%d+%d+%d-%d-%d)", result, p, q, p, q)
+        end
     end
 end
 
 --- Return a triple-layer XOR expression (with optional additive noise) that evaluates to integer n.
 --- Noise form is randomised so the pattern differs from obfuscate_int_deep.
----@param n integer
+---@param n       integer
+---@param xorname string?  name of the runtime XOR function to call
 ---@return string  Lua expression string
-function Utils.obfuscate_int_triple(n)
+function Utils.obfuscate_int_triple(n, xorname)
     local a = math.random(0, 0x1FFFFFFF)
     local b = a ~ n
     local c = math.random(0, 0x1FFFFFFF)
     local d = c ~ b
-    -- (a ~ (c ~ d)) ~ b  ==  a ~ b  ==  n
+    -- (a XOR (c XOR d)) XOR b  ==  a XOR b  ==  n
     local form = math.random(1, 3)
-    if form == 1 then
-        -- bare triple
-        return string.format("((%d~(%d~%d))~%d)", a, c, d, b)
-    elseif form == 2 then
-        local p = math.random(1, 0x7FFF)
-        return string.format("((%d~(%d~%d))~%d+%d-%d)", a, c, d, b, p, p)
+    if xorname then
+        -- Emit function-call syntax compatible with all Lua versions
+        if form == 1 then
+            return string.format("(%s(%s(%d,%s(%d,%d)),%d))", xorname, xorname, a, xorname, c, d, b)
+        elseif form == 2 then
+            local p = math.random(1, 0x7FFF)
+            return string.format("((%s(%s(%d,%s(%d,%d)),%d))+%d-%d)", xorname, xorname, a, xorname, c, d, b, p, p)
+        else
+            local p = math.random(1, 0x3FFF)
+            local q = math.random(1, 0x3FFF)
+            return string.format("(%s(%s(%d,%s(%d,(%d+%d-%d))),%d))", xorname, xorname, a, xorname, c, d, p, p, b)
+        end
     else
-        local p = math.random(1, 0x3FFF)
-        local q = math.random(1, 0x3FFF)
-        return string.format("((%d~(%d~%d+%d-%d))~%d)", a, c, d, p, p, b)
+        -- No xorname: pre-compute XOR and use arithmetic-only noise
+        local result = n  -- (a XOR (c XOR d)) XOR b == n
+        if form == 1 then
+            return tostring(result)
+        elseif form == 2 then
+            local p = math.random(1, 0x7FFF)
+            return string.format("(%d+%d-%d)", result, p, p)
+        else
+            local p = math.random(1, 0x3FFF)
+            local q = math.random(1, 0x3FFF)
+            return string.format("(%d+%d+%d-%d-%d)", result, p, q, p, q)
+        end
     end
 end
 

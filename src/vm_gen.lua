@@ -305,6 +305,10 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local bShl = vn()   -- left shift   (a << b)
     local bShr = vn()   -- right shift  (a >> b)
 
+    -- Helper: emit an obfuscated integer expression using the runtime bXor function
+    -- so no ~ operator appears in the generated output (Luau/Lua 5.1 compatible).
+    local function _obfInt(n) return utils.obfuscate_int_deep(n, bXor) end
+
     -- ── 3. Compute SHA-256 of the encrypted blob for anti-tamper ─────────────
     local blob_sha = utils.sha256(blob)
     local blob_sha_words = {}
@@ -505,7 +509,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     for i = 1, #sbox_vals do sbox_strs[i] = tostring(sbox_vals[i] ~ sbox_mask) end
     LF("local %s={[0]=%s}", aesSbox, table.concat(sbox_strs, ","))
     LF("do local _m=%s;for _i=0,255 do %s[_i]=%s(%s[_i],_m) end end",
-       utils.obfuscate_int_deep(sbox_mask), aesSbox, bXor, aesSbox)
+       _obfInt(sbox_mask), aesSbox, bXor, aesSbox)
     LF("local function %s(_a) return %s(%s(%s(_a,1),(_a>=0x80 and 0x1b or 0)),0xFF) end", aesXt, bAnd, bXor, bShl)
     LF("local function %s(_k)", aesKe)
     LF("  local _w={}")
@@ -518,7 +522,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         for i = 1, 7 do rc_strs[i] = string.format("[%d]=%d", i, (rc_raw[i] ~ rc_mask) & 0xFFFFFFFF) end
         LF("  local _rc={%s}", table.concat(rc_strs, ","))
         LF("  do local _rm=%s;for _i=1,7 do _rc[_i]=%s(%s(_rc[_i],_rm),0xFFFFFFFF) end end",
-           utils.obfuscate_int_deep(rc_mask), bAnd, bXor)
+           _obfInt(rc_mask), bAnd, bXor)
     end
     LF("  for _i=8,59 do")
     LF("    local _t=_w[_i-1]")
@@ -879,14 +883,14 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     src[#src+1] = junk_block("  ", math.random(1, 2))
 
     -- ── Pre-compute obfuscated mask/shift constants (evaluated once) ──────────
-    local _m63   = utils.obfuscate_int_deep(0x3F)
-    local _m255  = utils.obfuscate_int_deep(0xFF)
-    local _m511  = utils.obfuscate_int_deep(0x1FF)
-    local _m18   = utils.obfuscate_int_deep(0x3FFFF)
-    local _bias  = utils.obfuscate_int_deep(131071)
-    local _sh6   = utils.obfuscate_int_deep(6)
-    local _sh14  = utils.obfuscate_int_deep(14)
-    local _sh23  = utils.obfuscate_int_deep(23)
+    local _m63   = _obfInt(0x3F)
+    local _m255  = _obfInt(0xFF)
+    local _m511  = _obfInt(0x1FF)
+    local _m18   = _obfInt(0x3FFFF)
+    local _bias  = _obfInt(131071)
+    local _sh6   = _obfInt(6)
+    local _sh14  = _obfInt(14)
+    local _sh23  = _obfInt(23)
     -- Emit as locals inside execute (pre-computed, not re-evaluated per instruction)
     local eMask63  = vn(); local eMask255 = vn(); local eMask511 = vn()
     local eMask18  = vn(); local eBias    = vn()
@@ -928,48 +932,48 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Key chunk 1 (bytes 1-8, each pre-XOR'd with km[1])
     do
         local t = {}
-        for bi = 1, 8 do t[bi] = utils.obfuscate_int_deep(key:byte(bi) ~ km[1]) end
+        for bi = 1, 8 do t[bi] = _obfInt(key:byte(bi) ~ km[1]) end
         LF("local %s=string.char(%s)", vKp1, table.concat(t, ","))
     end
     -- Key chunk 2 (bytes 9-16, each pre-XOR'd with km[2])
     do
         local t = {}
-        for bi = 1, 8 do t[bi] = utils.obfuscate_int_deep(key:byte(8+bi) ~ km[2]) end
+        for bi = 1, 8 do t[bi] = _obfInt(key:byte(8+bi) ~ km[2]) end
         LF("local %s=string.char(%s)", vKp2, table.concat(t, ","))
     end
     -- Key chunk 3 (bytes 17-24, each pre-XOR'd with km[3])
     do
         local t = {}
-        for bi = 1, 8 do t[bi] = utils.obfuscate_int_deep(key:byte(16+bi) ~ km[3]) end
+        for bi = 1, 8 do t[bi] = _obfInt(key:byte(16+bi) ~ km[3]) end
         LF("local %s=string.char(%s)", vKp3, table.concat(t, ","))
     end
     -- Key chunk 4 (bytes 25-32, each pre-XOR'd with km[4])
     do
         local t = {}
-        for bi = 1, 8 do t[bi] = utils.obfuscate_int_deep(key:byte(24+bi) ~ km[4]) end
+        for bi = 1, 8 do t[bi] = _obfInt(key:byte(24+bi) ~ km[4]) end
         LF("local %s=string.char(%s)", vKp4, table.concat(t, ","))
     end
     -- Nonce chunk 1 (bytes 1-4, each pre-XOR'd with nm[1])
     do
         local t = {}
-        for bi = 1, 4 do t[bi] = utils.obfuscate_int_deep(nonce:byte(bi) ~ nm[1]) end
+        for bi = 1, 4 do t[bi] = _obfInt(nonce:byte(bi) ~ nm[1]) end
         LF("local %s=string.char(%s)", vNp1, table.concat(t, ","))
     end
     -- Nonce chunk 2 (bytes 5-8, each pre-XOR'd with nm[2])
     do
         local t = {}
-        for bi = 1, 4 do t[bi] = utils.obfuscate_int_deep(nonce:byte(4+bi) ~ nm[2]) end
+        for bi = 1, 4 do t[bi] = _obfInt(nonce:byte(4+bi) ~ nm[2]) end
         LF("local %s=string.char(%s)", vNp2, table.concat(t, ","))
     end
     -- Decoy key fragments (random bytes, never used for actual decryption)
     do
         local t = {}
-        for bi = 1, 8 do t[bi] = utils.obfuscate_int_deep(math.random(0, 255)) end
+        for bi = 1, 8 do t[bi] = _obfInt(math.random(0, 255)) end
         LF("local %s=string.char(%s)", vDk1, table.concat(t, ","))
     end
     do
         local t = {}
-        for bi = 1, 8 do t[bi] = utils.obfuscate_int_deep(math.random(0, 255)) end
+        for bi = 1, 8 do t[bi] = _obfInt(math.random(0, 255)) end
         LF("local %s=string.char(%s)", vDk2, table.concat(t, ","))
     end
 
@@ -985,7 +989,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("  local function _rr(_x,_n) return %s(%s(%s(_x,_n),%s(_x,32-_n)),0xFFFFFFFF) end", bAnd,bOr,bShr,bShl)
     LF("  local _k={%s}", table.concat(sha_k_strs, ","))
     LF("  do local _m=%s;for _i=1,64 do _k[_i]=%s(%s(_k[_i],_m),0xFFFFFFFF) end end",
-       utils.obfuscate_int_deep(sha_k_mask), bAnd, bXor)
+       _obfInt(sha_k_mask), bAnd, bXor)
     -- Mask SHA-256 initial hash values (IV) so they don't fingerprint SHA-256 init.
     do
         local sha_h_raw  = {0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19}
@@ -994,7 +998,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         for i = 1, 8 do sha_h_strs[i] = tostring((sha_h_raw[i] ~ sha_h_mask) & 0xFFFFFFFF) end
         LF("  local %s={%s}", shaH, table.concat(sha_h_strs, ","))
         LF("  do local _hm=%s;for _i=1,8 do %s[_i]=%s(%s(%s[_i],_hm),0xFFFFFFFF) end end",
-           utils.obfuscate_int_deep(sha_h_mask), shaH, bAnd, bXor, shaH)
+           _obfInt(sha_h_mask), shaH, bAnd, bXor, shaH)
     end
     LF("  local _len=#_s;local _bl=_len*8")
     LF("  local _pd=_s..'\\x80'")
@@ -1032,7 +1036,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("local %s=%s(%s)", atSha, shaFn, vBlob)
     local sha_checks = {}
     for i = 0, 7 do
-        local word_exp = utils.obfuscate_int_deep(blob_sha_words[i])
+        local word_exp = _obfInt(blob_sha_words[i])
         sha_checks[i+1] = string.format("(string.unpack('>I4',%s,%d)~=%s)", atSha, i*4+1, word_exp)
     end
     -- Obfuscate the integrity-check error message so it doesn't appear as plaintext.
@@ -1040,7 +1044,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         local emsg = "Catify: integrity check failed"
         local emask = math.random(1, 255)
         local eparts = {}
-        for i = 1, #emsg do eparts[i] = utils.obfuscate_int_deep(emsg:byte(i) ~ emask) end
+        for i = 1, #emsg do eparts[i] = _obfInt(emsg:byte(i) ~ emask) end
         -- Split into chunks of 60 to stay within Lua's register limit.
         local echunks = {}
         for i = 1, #eparts, 60 do
@@ -1049,7 +1053,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
             echunks[#echunks+1] = string.format("string.char(%s)", table.concat(ch, ","))
         end
         -- The XOR decode is inlined as a function expression; emask is obfuscated.
-        local emask_expr = utils.obfuscate_int_deep(emask)
+        local emask_expr = _obfInt(emask)
         local eraw = table.concat(echunks, "..")
         LF("if %s then local _em=%s local _ed={} for _i=1,#_em do _ed[_i]=string.char(%s(_em:byte(_i),%s)) end error(table.concat(_ed),0) end",
            table.concat(sha_checks, " or "), eraw, bXor, emask_expr)
@@ -1069,7 +1073,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         local mask = math.random(1, 255)
         local all_parts = {}
         for i = 1, #code_str do
-            all_parts[i] = utils.obfuscate_int_deep(code_str:byte(i) ~ mask)
+            all_parts[i] = _obfInt(code_str:byte(i) ~ mask)
         end
         local chunks = {}
         for i = 1, #all_parts, AT_CHUNK do
@@ -1079,7 +1083,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
             end
             chunks[#chunks + 1] = string.format("string.char(%s)", table.concat(chunk, ","))
         end
-        LF("%s(%s,%s)", vAtExec, table.concat(chunks, ".."), utils.obfuscate_int_deep(mask))
+        LF("%s(%s,%s)", vAtExec, table.concat(chunks, ".."), _obfInt(mask))
     end
 
     -- Anti-tamper 2: debug hook detection (self-contained, wrapped in pcall for Roblox)
@@ -1165,20 +1169,20 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("do")
     LF("  local _kt={}")
     LF("  local _km1=%s;for _j=1,8 do _kt[_j]=string.char(%s(%s:byte(_j),_km1))end",
-       utils.obfuscate_int_deep(km[1]), bXor, vKp1)
+       _obfInt(km[1]), bXor, vKp1)
     LF("  local _km2=%s;for _j=1,8 do _kt[8+_j]=string.char(%s(%s:byte(_j),_km2))end",
-       utils.obfuscate_int_deep(km[2]), bXor, vKp2)
+       _obfInt(km[2]), bXor, vKp2)
     LF("  local _km3=%s;for _j=1,8 do _kt[16+_j]=string.char(%s(%s:byte(_j),_km3))end",
-       utils.obfuscate_int_deep(km[3]), bXor, vKp3)
+       _obfInt(km[3]), bXor, vKp3)
     LF("  local _km4=%s;for _j=1,8 do _kt[24+_j]=string.char(%s(%s:byte(_j),_km4))end",
-       utils.obfuscate_int_deep(km[4]), bXor, vKp4)
+       _obfInt(km[4]), bXor, vKp4)
     LF("  %s=table.concat(_kt)", vKey)
     LF("  %s=nil;%s=nil;%s=nil;%s=nil;_kt=nil", vKp1, vKp2, vKp3, vKp4)
     LF("  local _nt={}")
     LF("  local _nm1=%s;for _j=1,4 do _nt[_j]=string.char(%s(%s:byte(_j),_nm1))end",
-       utils.obfuscate_int_deep(nm[1]), bXor, vNp1)
+       _obfInt(nm[1]), bXor, vNp1)
     LF("  local _nm2=%s;for _j=1,4 do _nt[4+_j]=string.char(%s(%s:byte(_j),_nm2))end",
-       utils.obfuscate_int_deep(nm[2]), bXor, vNp2)
+       _obfInt(nm[2]), bXor, vNp2)
     LF("  %s=table.concat(_nt)", vNonce)
     LF("  %s=nil;%s=nil;_nt=nil", vNp1, vNp2)
     LF("end")
