@@ -32,7 +32,7 @@ local BANNER = [[
  | |   / _` | __| | |_| | | |
  | |__| (_| | |_| |  _| |_| |
   \____\__,_|\__|_|_|  \__, |
-                        |___/   v2.0.0 — Commercial Lua Obfuscator
+                        |___/   v2.0.0 — boss cat was here
 
   Options:
     --seed N        Use fixed random seed N (for reproducible output)
