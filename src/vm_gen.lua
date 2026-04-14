@@ -334,7 +334,6 @@ function VmGen.generate(proto, revmap, key, utils)
         function(indent)
             local big = math.random(0x1000, 0x7FFF)
             local small = math.random(1, big - 1)
-            local wrong = small - math.random(1, small)
             return string.format(
                 "%sdo local %s=math.max(%d,%d);if %s<%d then %s=%s+1 end end\n",
                 indent, jA, big, small, jA, big, jA, jA)
