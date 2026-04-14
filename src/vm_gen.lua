@@ -271,6 +271,10 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local atKl2     = vn()
     local atKl3     = vn()
     local atKl4     = vn()
+    -- Anti-environmental logger variable names
+    local atEnv1    = vn()
+    local atEnv2    = vn()
+    local atEnv3    = vn()
     -- SHA-256 integrity check variable names
     local atSha     = vn()
     -- Watermark variable name
@@ -380,6 +384,23 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
                 "%sdo local %s=string.rep(%q,%d);if #%s~=%d then %s=nil end end\n",
                 indent, jA, ch, n, jA, n, jA)
         end,
+        -- form 9: fake config table with dead branch (looks like real init code)
+        function(indent)
+            local cfg_keys = {"timeout","retries","verbose","mode","level","limit"}
+            local k = cfg_keys[math.random(1, #cfg_keys)]
+            local v = math.random(0, 1) == 1 and "true" or tostring(math.random(1,9))
+            return string.format(
+                "%sdo local %s={%s=%s};if %s.%s==nil then %s.%s=%s end end\n",
+                indent, jA, k, v, jA, k, jA, k, v)
+        end,
+        -- form 10: fake string sanitize (dead upper/lower branch)
+        function(indent)
+            local words = {"data","value","result","output","buffer","token"}
+            local w = words[math.random(1, #words)]
+            return string.format(
+                "%sdo local %s=%q;local %s=string.upper(%s);if #%s<0 then %s=%s end end\n",
+                indent, jA, w, jB, jA, jB, jA, jB)
+        end,
     }
     local function junk_stmt(indent)
         return junk_forms[math.random(1, #junk_forms)](indent)
@@ -399,41 +420,19 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- ── Header comment (minimal, for compact output) ─────────────────────────
     -- (intentionally omitted for compact output)
 
-    -- ── Base91-encoded payload at the top (single string, emitted before do block) ──
-    local _b91_payload = utils.base91_enc(blob)
-    LF("%s=%q", PAYLOAD_TABLE_NAME, _b91_payload)
+    -- ── Chunked \NNN-escaped payload table at the top (emitted before do block) ──
+    src[#src+1] = emit_payload_table(blob) .. "\n"
 
     -- Wrap all VM internals in a do...end block so locals don't pollute global scope
     L("do")
     L("local _=tostring;local __=type;local ___=pcall;local ____=load")
     -- Junk block at top of do-scope (dead computations, not reachable by any real code path)
     src[#src+1] = junk_block("", math.random(2, 4))
-    -- ── Emit Base91 decoder ──────────────────────────────────────────────────
-    local B91_ALPHA_STR = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,./:;<=>?@[]^_`{|}~\""
-    LF("local %s=%q", b91Alpha, B91_ALPHA_STR)
-    LF("local function %s(%s)", b91Dec, b91I)
-    LF("  local %s={}", b91Tbl)
-    LF("  for _i=1,#%s do %s[%s:byte(_i)]=_i-1 end", b91Alpha, b91Tbl, b91Alpha)
-    LF("  local %s,%s,%s=-1,0,0", b91V, b91B, b91N_)
-    LF("  local %s={}", b91Out)
-    LF("  for _i=1,#%s do", b91I)
-    LF("    local %s=%s[%s:byte(_i)]", b91P, b91Tbl, b91I)
-    LF("    if %s~=nil then", b91P)
-    LF("      if %s<0 then %s=%s", b91V, b91V, b91P)
-    LF("      else")
-    LF("        %s=%s+%s*91", b91V, b91V, b91P)
-    LF("        %s=%s|(%s<<%s)", b91B, b91B, b91V, b91N_)
-    LF("        if (%s&8191)>88 then %s=%s+13 else %s=%s+14 end", b91V, b91N_, b91N_, b91N_, b91N_)
-    LF("        repeat %s[#%s+1]=string.char(%s&255);%s=%s>>8;%s=%s-8 until %s<=7",
-       b91Out, b91Out, b91B, b91B, b91B, b91N_, b91N_, b91N_)
-    LF("        %s=-1", b91V)
-    LF("      end")
-    LF("    end")
-    LF("  end")
-    LF("  if %s>-1 then %s[#%s+1]=string.char((%s|(%s<<%s))&255) end", b91V, b91Out, b91Out, b91B, b91V, b91N_)
-    LF("  return table.concat(%s)", b91Out)
-    LF("end")
-    -- Junk between Base91 decoder and AES functions
+    -- ── Emit payload concatenation helper (decoy wrapper using allocated names) ──
+    LF("local %s=%q", b91Alpha, "catify")
+    LF("local function %s(%s) local %s={} for _i=1,#%s do %s[_i]=%s[_i] end return table.concat(%s) end",
+       b91Dec, b91I, b91Out, b91I, b91Out, b91I, b91Out)
+    -- (b91Tbl, b91V, b91B, b91N_, b91P consume name-pool slots; used as junk locals below)
     src[#src+1] = junk_block("", math.random(1, 2))
     -- ── Emit inline AES-256-CTR decrypt ─────────────────────────────────────
     -- S-box table literal
@@ -842,9 +841,9 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- ── Main: anti-tamper, decrypt, deserialize, run ──────────
     -- The payload table (superflow_bytecode) was already emitted at the top of the file.
 
-    -- AES key + nonce
-    LF("local %s=%q", vKey, key)
-    LF("local %s=%q", vNonce, nonce)
+    -- AES key + nonce (use \NNN decimal escapes to avoid %q newline-embedding issue)
+    LF("local %s=\"%s\"", vKey, bytes_esc(key))
+    LF("local %s=\"%s\"", vNonce, bytes_esc(nonce))
 
     -- Anti-tamper 1: SHA-256 integrity check of the encrypted blob
     -- Emit inline SHA-256 function
@@ -884,9 +883,9 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("  end")
     LF("  local _out={};for _i=1,8 do _out[_i]=string.pack('>I4',%s[_i]) end;return table.concat(_out)", shaH)
     LF("end")
-    -- Decode Base91 payload into vBlob
-    LF("local %s=%s(%s)", vBlob, b91Dec, PAYLOAD_TABLE_NAME)
-    LF("%s=nil", PAYLOAD_TABLE_NAME)   -- wipe payload string after decoding
+    -- Decode payload table into vBlob (simple concatenation of \NNN-escaped chunks)
+    LF("local %s=table.concat(%s)", vBlob, PAYLOAD_TABLE_NAME)
+    LF("%s=nil", PAYLOAD_TABLE_NAME)   -- wipe payload table after reading
     -- SHA-256 integrity check: compute hash and compare 8 words
     LF("local %s=%s(%s)", atSha, shaFn, vBlob)
     local sha_checks = {}
@@ -952,6 +951,18 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("do local %s,_r=pcall(function()return true end);if not %s or _r~=true then error('Catify: keylogger detected (pcall)',0)end end",
        atKl4, atKl4)
 
+    -- Anti-environmental logger 1: detect _G/_ENV monitoring via metamethod proxy
+    LF("do local %s=getmetatable(_G or _ENV);if %s~=nil then if rawget(%s,'__newindex')~=nil or rawget(%s,'__index')~=nil then error('Catify: env logger detected',0)end end end",
+       atEnv1, atEnv1, atEnv1, atEnv1)
+
+    -- Anti-environmental logger 2: os library must not be replaced or wrapped
+    LF("do local %s=rawget(_ENV,'os');if %s~=nil then if type(%s.getenv)~='function' or type(%s.time)~='function' then error('Catify: env tampered (os)',0)end end end",
+       atEnv2, atEnv2, atEnv2, atEnv2)
+
+    -- Anti-environmental logger 3: numbers must not have a metatable (some loggers patch this)
+    LF("do local %s=getmetatable(0);if %s~=nil then error('Catify: env logger detected (nummt)',0)end end",
+       atEnv3, atEnv3)
+
     -- Watermark: obfuscated ASCII cat watermark (sits in memory, never printed)
     local wm_bytes = {32,32,47,92,95,47,92,32,32,10,32,40,111,46,111,32,41,10,32,32,62,32,94,32,60,10,32,67,97,116,105,102,121,32,118,50,46,48}
     local wm_parts = {}
@@ -977,15 +988,22 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local compact_lines = {}
     for line in full:gmatch("[^\n]+") do
         -- Strip leading whitespace, then strip trailing whitespace separately
-        local trimmed = line:match("^%s*(.+)$")
-        if trimmed then
+        local trimmed = line:match("^%s*(.+)$")        if trimmed then
             trimmed = trimmed:match("^(.-)%s*$")
         end
         if trimmed and trimmed ~= "" then
             compact_lines[#compact_lines + 1] = trimmed
         end
     end
-    return table.concat(compact_lines, " ")
+    -- Prepend ASCII watermark as a block comment at the top of the output file
+    local watermark = "--[[\n"
+        .. "   /\\_/\\  \n"
+        .. "  ( o.o ) \n"
+        .. "   > ^ <  \n"
+        .. "  Catify v2.0.0 -- Protected by Catify\n"
+        .. "  https://github.com/francyw22/catify\n"
+        .. "]]\n"
+    return watermark .. table.concat(compact_lines, " ")
 end
 
 return VmGen
