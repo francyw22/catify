@@ -5,9 +5,9 @@
     Responsibilities:
       1. Re-serialize the (already opcode-shuffled) Proto tree into a compact
          custom binary format.
-      2. Encrypt that blob with RC4 (key supplied by the caller).
+      2. Encrypt that blob with AES-256-CTR (32-byte key + 8-byte nonce supplied by the caller).
       3. Emit a self-contained Lua 5.3 source file that:
-           • Decrypts and deserializes the blob at runtime.
+           • Decodes Base91 payload, checks SHA-256 integrity, decrypts with AES-256-CTR.
            • Runs a complete Lua 5.3 virtual machine implementing all 47 opcodes.
            • Uses shuffled opcode numbers, random local-variable names, and a
              state-machine dispatch loop for control-flow obfuscation.
@@ -160,18 +160,19 @@ end
 --- Generate the complete obfuscated Lua source for the given proto.
 ---@param proto   table   Top-level proto (opcodes already shuffled in .code arrays)
 ---@param revmap  table   revmap[shuffled_op] = real_op  (0-indexed)
----@param key     string  RC4 key used to encrypt the bytecode blob
----@param utils   table   The Utils module (for RC4 and rand_names)
+---@param key     string  AES-256 key (32 bytes) used to encrypt the bytecode blob
+---@param nonce   string  AES-256-CTR nonce (8 bytes)
+---@param utils   table   The Utils module (for aes256_ctr, sha256, base91_enc, rand_names)
 ---@return string  Lua source
-function VmGen.generate(proto, revmap, key, utils)
+function VmGen.generate(proto, revmap, key, nonce, utils)
     -- ── 1. Serialize + encrypt the custom bytecode ───────────────────────────
     local sxor_byte = math.random(1, 255)     -- per-session string XOR key
     local raw  = serialize_proto(proto, sxor_byte)
-    local blob = utils.rc4(raw, key)
+    local blob = utils.aes256_ctr(raw, key, nonce)
 
     -- ── 2. Generate random identifiers for all locals ───────────────────────
     -- We need ~80 unique names for VM internals
-    local N  = utils.rand_names(100)
+    local N  = utils.rand_names(200)
     local ni = 0
     local function vn()   -- "variable name"
         ni = ni + 1
@@ -197,16 +198,27 @@ function VmGen.generate(proto, revmap, key, utils)
     local dRf64     = vn()   -- read f64
     local dRstr     = vn()   -- read string
 
-    -- RC4 internals
-    local rc4S      = vn()
-    local rc4I      = vn()
-    local rc4J      = vn()
-    local rc4Out    = vn()
-    local rc4N      = vn()
-    local rc4Tmp    = vn()
-    local rc4Klen   = vn()
-    local rc4K      = vn()   -- key param
-    local rc4D      = vn()   -- data param
+    -- AES-256-CTR inline variables
+    local aesSbox   = vn()   -- S-box table name
+    local aesXt     = vn()   -- xtime helper function name
+    local aesKe     = vn()   -- key expand function name
+    local aesEb     = vn()   -- block encrypt function name
+    local vNonce    = vn()   -- nonce variable name
+    -- SHA-256 inline variables
+    local shaFn     = vn()   -- sha256 function name
+    local shaK      = vn()   -- K constants table name (unused var, kept for naming pool)
+    local shaH      = vn()   -- hash state name
+    local shaW      = vn()   -- message schedule name
+    -- Base91 inline decoder variables
+    local b91Alpha  = vn()   -- alphabet string variable
+    local b91Dec    = vn()   -- decoder function name
+    local b91Tbl    = vn()   -- lookup table name
+    local b91V      = vn()   -- v variable
+    local b91B      = vn()   -- b variable
+    local b91N_     = vn()   -- n variable (trailing _ to avoid clash with Lua keyword)
+    local b91Out    = vn()   -- output table
+    local b91P      = vn()   -- p (decoded value) variable
+    local b91I      = vn()   -- input parameter name
 
     -- Execute function params/locals
     local eProto    = vn()
@@ -254,6 +266,15 @@ function VmGen.generate(proto, revmap, key, utils)
     local vStrXor   = vn()   -- string-constant XOR key (second encryption layer)
     local atVer     = vn()   -- Lua version check scratch
     local atRaw     = vn()   -- raw* functions check scratch
+    -- Anti-keylogger variable names
+    local atKl1     = vn()
+    local atKl2     = vn()
+    local atKl3     = vn()
+    local atKl4     = vn()
+    -- SHA-256 integrity check variable names
+    local atSha     = vn()
+    -- Watermark variable name
+    local vWm       = vn()
     -- decoy function names
     local vDecoy    = vn()   -- decoy function (defined, never called)
     local dkA       = vn()
@@ -266,8 +287,12 @@ function VmGen.generate(proto, revmap, key, utils)
     local eRetVals  = vn()   -- return-values accumulator
     local eRetN     = vn()   -- number of return values
 
-    -- ── 3. Compute CRC32 of the encrypted blob for anti-tamper ──────────────
-    local blob_crc = utils.crc32(blob)
+    -- ── 3. Compute SHA-256 of the encrypted blob for anti-tamper ─────────────
+    local blob_sha = utils.sha256(blob)
+    local blob_sha_words = {}
+    for i = 0, 7 do
+        blob_sha_words[i] = string.unpack(">I4", blob_sha, i*4+1)
+    end
 
     -- ── 4. Build the revmap literal ─────────────────────────────────────────
     local revmap_parts = {}
@@ -374,38 +399,104 @@ function VmGen.generate(proto, revmap, key, utils)
     -- ── Header comment (minimal, for compact output) ─────────────────────────
     -- (intentionally omitted for compact output)
 
-    -- ── Chunked payload table at the top (reference style: global assignment) ─
-    -- This is emitted first so it matches the reference's `superflow_bytecode={...}`
-    -- layout exactly: the table is defined before the VM runtime code.
-    src[#src+1] = emit_payload_table(blob) .. "\n"
+    -- ── Base91-encoded payload at the top (single string, emitted before do block) ──
+    local _b91_payload = utils.base91_enc(blob)
+    LF("%s=%q", PAYLOAD_TABLE_NAME, _b91_payload)
 
     -- Wrap all VM internals in a do...end block so locals don't pollute global scope
     L("do")
     L("local _=tostring;local __=type;local ___=pcall;local ____=load")
     -- Junk block at top of do-scope (dead computations, not reachable by any real code path)
     src[#src+1] = junk_block("", math.random(2, 4))
-    LF("local function %s(%s,%s)", vDecrypt, rc4D, rc4K)
-    LF("  local %s={}",          rc4S)
-    LF("  for %s=0,255 do %s[%s]=%s end", rc4I, rc4S, rc4I, rc4I)
-    LF("  local %s=0", rc4J)
-    LF("  local %s=#%s", rc4Klen, rc4K)
-    LF("  for %s=0,255 do", rc4I)
-    LF("    %s=(%s+%s[%s]+%s:byte((%s%%%s)+1))%%256", rc4J, rc4J, rc4S, rc4I, rc4K, rc4I, rc4Klen)
-    LF("    %s[%s],%s[%s]=%s[%s],%s[%s]", rc4S, rc4I, rc4S, rc4J, rc4S, rc4J, rc4S, rc4I)
+    -- ── Emit Base91 decoder ──────────────────────────────────────────────────
+    local B91_ALPHA_STR = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,./:;<=>?@[]^_`{|}~\""
+    LF("local %s=%q", b91Alpha, B91_ALPHA_STR)
+    LF("local function %s(%s)", b91Dec, b91I)
+    LF("  local %s={}", b91Tbl)
+    LF("  for _i=1,#%s do %s[%s:byte(_i)]=_i-1 end", b91Alpha, b91Tbl, b91Alpha)
+    LF("  local %s,%s,%s=-1,0,0", b91V, b91B, b91N_)
+    LF("  local %s={}", b91Out)
+    LF("  for _i=1,#%s do", b91I)
+    LF("    local %s=%s[%s:byte(_i)]", b91P, b91Tbl, b91I)
+    LF("    if %s~=nil then", b91P)
+    LF("      if %s<0 then %s=%s", b91V, b91V, b91P)
+    LF("      else")
+    LF("        %s=%s+%s*91", b91V, b91V, b91P)
+    LF("        %s=%s|(%s<<%s)", b91B, b91B, b91V, b91N_)
+    LF("        if (%s&8191)>88 then %s=%s+13 else %s=%s+14 end", b91V, b91N_, b91N_, b91N_, b91N_)
+    LF("        repeat %s[#%s+1]=string.char(%s&255);%s=%s>>8;%s=%s-8 until %s<=7",
+       b91Out, b91Out, b91B, b91B, b91B, b91N_, b91N_, b91N_)
+    LF("        %s=-1", b91V)
+    LF("      end")
+    LF("    end")
     LF("  end")
-    LF("  local %s={}", rc4Out)
-    LF("  %s=0", rc4I)
-    LF("  %s=0", rc4J)
-    LF("  for %s=1,#%s do", rc4N, rc4D)
-    LF("    %s=(%s+1)%%256", rc4I, rc4I)
-    LF("    %s=(%s+%s[%s])%%256", rc4J, rc4J, rc4S, rc4I)
-    LF("    %s[%s],%s[%s]=%s[%s],%s[%s]", rc4S, rc4I, rc4S, rc4J, rc4S, rc4J, rc4S, rc4I)
-    LF("    %s[%s]=string.char(%s:byte(%s)~%s[(%s[%s]+%s[%s])%%256])",
-       rc4Out, rc4N, rc4D, rc4N, rc4S, rc4S, rc4I, rc4S, rc4J)
-    LF("  end")
-    LF("  return table.concat(%s)", rc4Out)
+    LF("  if %s>-1 then %s[#%s+1]=string.char((%s|(%s<<%s))&255) end", b91V, b91Out, b91Out, b91B, b91V, b91N_)
+    LF("  return table.concat(%s)", b91Out)
     LF("end")
-    -- Junk block between RC4 function and deserializer
+    -- Junk between Base91 decoder and AES functions
+    src[#src+1] = junk_block("", math.random(1, 2))
+    -- ── Emit inline AES-256-CTR decrypt ─────────────────────────────────────
+    -- S-box table literal
+    local sbox_vals = {0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16}
+    local sbox_strs = {}
+    for i = 1, #sbox_vals do sbox_strs[i] = tostring(sbox_vals[i]) end
+    LF("local %s={[0]=%s}", aesSbox, table.concat(sbox_strs, ","))
+    LF("local function %s(_a) return((_a<<1)~(_a>=0x80 and 0x1b or 0))&0xFF end", aesXt)
+    LF("local function %s(_k)", aesKe)
+    LF("  local _w={}")
+    LF("  for _i=0,7 do _w[_i]=(_k:byte(_i*4+1)<<24)|(_k:byte(_i*4+2)<<16)|(_k:byte(_i*4+3)<<8)|_k:byte(_i*4+4) end")
+    LF("  local _rc={[1]=0x01000000,[2]=0x02000000,[3]=0x04000000,[4]=0x08000000,[5]=0x10000000,[6]=0x20000000,[7]=0x40000000}")
+    LF("  for _i=8,59 do")
+    LF("    local _t=_w[_i-1]")
+    LF("    if _i%%8==0 then")
+    LF("      _t=((_t<<8)|(_t>>24))&0xFFFFFFFF")
+    LF("      _t=(%s[(_t>>24)&0xFF]<<24)|(%s[(_t>>16)&0xFF]<<16)|(%s[(_t>>8)&0xFF]<<8)|%s[_t&0xFF]", aesSbox,aesSbox,aesSbox,aesSbox)
+    LF("      _t=(_t~_rc[_i//8])&0xFFFFFFFF")
+    LF("    elseif _i%%8==4 then")
+    LF("      _t=(%s[(_t>>24)&0xFF]<<24)|(%s[(_t>>16)&0xFF]<<16)|(%s[(_t>>8)&0xFF]<<8)|%s[_t&0xFF]", aesSbox,aesSbox,aesSbox,aesSbox)
+    LF("    end")
+    LF("    _w[_i]=(_w[_i-8]~_t)&0xFFFFFFFF")
+    LF("  end")
+    LF("  return _w")
+    LF("end")
+    LF("local function %s(_blk,_rk)", aesEb)
+    LF("  local _s={}")
+    LF("  for _i=0,15 do _s[_i]=_blk:byte(_i+1) end")
+    LF("  for _c=0,3 do local _w=_rk[_c];_s[_c*4]=_s[_c*4]~((_w>>24)&0xFF);_s[_c*4+1]=_s[_c*4+1]~((_w>>16)&0xFF);_s[_c*4+2]=_s[_c*4+2]~((_w>>8)&0xFF);_s[_c*4+3]=_s[_c*4+3]~(_w&0xFF) end")
+    LF("  for _r=1,13 do")
+    LF("    for _i=0,15 do _s[_i]=%s[_s[_i]] end", aesSbox)
+    LF("    local _t;_t=_s[1];_s[1]=_s[5];_s[5]=_s[9];_s[9]=_s[13];_s[13]=_t")
+    LF("    _t=_s[2];local _t2=_s[6];_s[2]=_s[10];_s[6]=_s[14];_s[10]=_t;_s[14]=_t2")
+    LF("    _t=_s[3];_s[3]=_s[15];_s[15]=_s[11];_s[11]=_s[7];_s[7]=_t")
+    LF("    for _c=0,3 do")
+    LF("      local _a0,_a1,_a2,_a3=_s[_c*4],_s[_c*4+1],_s[_c*4+2],_s[_c*4+3]")
+    LF("      _s[_c*4]=%s(_a0)~%s(_a1)~_a1~_a2~_a3", aesXt, aesXt)
+    LF("      _s[_c*4+1]=_a0~%s(_a1)~%s(_a2)~_a2~_a3", aesXt, aesXt)
+    LF("      _s[_c*4+2]=_a0~_a1~%s(_a2)~%s(_a3)~_a3", aesXt, aesXt)
+    LF("      _s[_c*4+3]=%s(_a0)~_a0~_a1~_a2~%s(_a3)", aesXt, aesXt)
+    LF("    end")
+    LF("    for _c=0,3 do local _w=_rk[_r*4+_c];_s[_c*4]=_s[_c*4]~((_w>>24)&0xFF);_s[_c*4+1]=_s[_c*4+1]~((_w>>16)&0xFF);_s[_c*4+2]=_s[_c*4+2]~((_w>>8)&0xFF);_s[_c*4+3]=_s[_c*4+3]~(_w&0xFF) end")
+    LF("  end")
+    LF("  for _i=0,15 do _s[_i]=%s[_s[_i]] end", aesSbox)
+    LF("  local _t;_t=_s[1];_s[1]=_s[5];_s[5]=_s[9];_s[9]=_s[13];_s[13]=_t")
+    LF("  _t=_s[2];local _t2=_s[6];_s[2]=_s[10];_s[6]=_s[14];_s[10]=_t;_s[14]=_t2")
+    LF("  _t=_s[3];_s[3]=_s[15];_s[15]=_s[11];_s[11]=_s[7];_s[7]=_t")
+    LF("  for _c=0,3 do local _w=_rk[56+_c];_s[_c*4]=_s[_c*4]~((_w>>24)&0xFF);_s[_c*4+1]=_s[_c*4+1]~((_w>>16)&0xFF);_s[_c*4+2]=_s[_c*4+2]~((_w>>8)&0xFF);_s[_c*4+3]=_s[_c*4+3]~(_w&0xFF) end")
+    LF("  local _o={};for _i=0,15 do _o[_i+1]=string.char(_s[_i]) end;return table.concat(_o)")
+    LF("end")
+    LF("local function %s(_d,_k,_nn)", vDecrypt)
+    LF("  local _rk=%s(_k)", aesKe)
+    LF("  local _out={};local _ctr=0;local _pos=1;local _dl=#_d")
+    LF("  while _pos<=_dl do")
+    LF("    local _cb=_nn..string.pack('<I8',_ctr)")
+    LF("    local _ks=%s(_cb,_rk)", aesEb)
+    LF("    local _bl=math.min(16,_dl-_pos+1)")
+    LF("    for _i=1,_bl do _out[#_out+1]=string.char(_d:byte(_pos+_i-1)~_ks:byte(_i)) end")
+    LF("    _pos=_pos+16;_ctr=_ctr+1")
+    LF("  end")
+    LF("  return table.concat(_out)")
+    LF("end")
+    -- Junk block between AES function and deserializer
     src[#src+1] = junk_block("", math.random(2, 3))
     -- Decoy function: looks like a secondary hash/encode but is never called.
     -- Its body is all dead computation (XOR mixing on random constants).
@@ -751,32 +842,59 @@ function VmGen.generate(proto, revmap, key, utils)
     -- ── Main: anti-tamper, decrypt, deserialize, run ──────────
     -- The payload table (superflow_bytecode) was already emitted at the top of the file.
 
-    -- RC4 key
-    LF("local %s=\"%s\"", vKey, bytes_esc(key))
+    -- AES key + nonce
+    LF("local %s=%q", vKey, key)
+    LF("local %s=%q", vNonce, nonce)
 
-    -- Anti-tamper 1: CRC32 integrity check of the encrypted blob
-    -- Inline CRC32 (so we don't depend on external functions at runtime)
-    LF("local function _crc32_(s)")
-    LF("  local _t={}")
-    LF("  for _i=0,255 do")
-    LF("    local _c=_i")
-    LF("    for _=1,8 do if _c&1~=0 then _c=0xEDB88320~(_c>>1) else _c=_c>>1 end end")
-    LF("    _t[_i]=_c")
+    -- Anti-tamper 1: SHA-256 integrity check of the encrypted blob
+    -- Emit inline SHA-256 function
+    local sha_k_vals = {0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2}
+    local sha_k_strs = {}
+    for i = 1, 64 do sha_k_strs[i] = tostring(sha_k_vals[i]) end
+    LF("local function %s(_s)", shaFn)
+    LF("  local function _rr(_x,_n) return((_x>>_n)|(_x<<(32-_n)))&0xFFFFFFFF end")
+    LF("  local _k={%s}", table.concat(sha_k_strs, ","))
+    LF("  local %s={0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19}", shaH)
+    LF("  local _len=#_s;local _bl=_len*8")
+    LF("  local _pd=_s..'\\x80'")
+    LF("  while #_pd%%64~=56 do _pd=_pd..'\\x00' end")
+    LF("  _pd=_pd..string.pack('>I4',(_bl>>32)&0xFFFFFFFF)..string.pack('>I4',_bl&0xFFFFFFFF)")
+    LF("  local %s={}", shaW)
+    LF("  for _blk=1,#_pd,64 do")
+    LF("    for _i=1,16 do %s[_i]=string.unpack('>I4',_pd,_blk+(_i-1)*4)&0xFFFFFFFF end", shaW)
+    LF("    for _i=17,64 do")
+    LF("      local _s0=(_rr(%s[_i-15],7)~_rr(%s[_i-15],18)~(%s[_i-15]>>3))", shaW,shaW,shaW)
+    LF("      local _s1=(_rr(%s[_i-2],17)~_rr(%s[_i-2],19)~(%s[_i-2]>>10))", shaW,shaW,shaW)
+    LF("      %s[_i]=(%s[_i-16]+_s0+%s[_i-7]+_s1)&0xFFFFFFFF", shaW,shaW,shaW)
+    LF("    end")
+    LF("    local _a,_b,_c,_d,_e,_f,_g,_hv=%s[1],%s[2],%s[3],%s[4],%s[5],%s[6],%s[7],%s[8]", shaH,shaH,shaH,shaH,shaH,shaH,shaH,shaH)
+    LF("    for _i=1,64 do")
+    LF("      local _S1=_rr(_e,6)~_rr(_e,11)~_rr(_e,25)")
+    LF("      local _ch=(_e&_f)~((~_e)&_g)")
+    LF("      local _t1=(_hv+_S1+_ch+_k[_i]+%s[_i])&0xFFFFFFFF", shaW)
+    LF("      local _S0=_rr(_a,2)~_rr(_a,13)~_rr(_a,22)")
+    LF("      local _maj=(_a&_b)~(_a&_c)~(_b&_c)")
+    LF("      local _t2=(_S0+_maj)&0xFFFFFFFF")
+    LF("      _hv=_g;_g=_f;_f=_e;_e=(_d+_t1)&0xFFFFFFFF;_d=_c;_c=_b;_b=_a;_a=(_t1+_t2)&0xFFFFFFFF")
+    LF("    end")
+    LF("    %s[1]=(%s[1]+_a)&0xFFFFFFFF;%s[2]=(%s[2]+_b)&0xFFFFFFFF", shaH,shaH,shaH,shaH)
+    LF("    %s[3]=(%s[3]+_c)&0xFFFFFFFF;%s[4]=(%s[4]+_d)&0xFFFFFFFF", shaH,shaH,shaH,shaH)
+    LF("    %s[5]=(%s[5]+_e)&0xFFFFFFFF;%s[6]=(%s[6]+_f)&0xFFFFFFFF", shaH,shaH,shaH,shaH)
+    LF("    %s[7]=(%s[7]+_g)&0xFFFFFFFF;%s[8]=(%s[8]+_hv)&0xFFFFFFFF", shaH,shaH,shaH,shaH)
     LF("  end")
-    LF("  local _r=0xFFFFFFFF")
-    LF("  for _i=1,#s do _r=_t[(_r~s:byte(_i))&0xFF]~(_r>>8) end")
-    LF("  return _r~0xFFFFFFFF")
+    LF("  local _out={};for _i=1,8 do _out[_i]=string.pack('>I4',%s[_i]) end;return table.concat(_out)", shaH)
     LF("end")
-    -- Emit expected CRC as an obfuscated XOR-split expression.
-    local crc_a = math.random(0, 0x3FFFFFFF)
-    local crc_b = crc_a ~ blob_crc
-    local crc_p = math.random(1, 0xFFFF)
-    local crc_q = math.random(1, 0xFFFF)
-    LF("local %s=((%d~%d)+%d+%d-%d-%d)", atCrc, crc_a, crc_b, crc_p, crc_q, crc_p, crc_q)
-    LF("local %s=table.concat(%s)", vBlob, PAYLOAD_TABLE_NAME)
-    LF("%s=nil", PAYLOAD_TABLE_NAME)   -- wipe payload table after concat
-    LF("local %s=_crc32_(%s)", atCalc, vBlob)
-    LF("if %s~=%s then error('Catify: integrity check failed',0) end", atCalc, atCrc)
+    -- Decode Base91 payload into vBlob
+    LF("local %s=%s(%s)", vBlob, b91Dec, PAYLOAD_TABLE_NAME)
+    LF("%s=nil", PAYLOAD_TABLE_NAME)   -- wipe payload string after decoding
+    -- SHA-256 integrity check: compute hash and compare 8 words
+    LF("local %s=%s(%s)", atSha, shaFn, vBlob)
+    local sha_checks = {}
+    for i = 0, 7 do
+        local word_exp = utils.obfuscate_int_deep(blob_sha_words[i])
+        sha_checks[i+1] = string.format("(string.unpack('>I4',%s,%d)~=%s)", atSha, i*4+1, word_exp)
+    end
+    LF("if %s then error('Catify: integrity check failed',0) end", table.concat(sha_checks, " or "))
 
     -- Anti-tamper 2: debug hook detection (wrapped in pcall for Roblox compatibility)
     LF("local %s", atDbg)
@@ -817,9 +935,33 @@ function VmGen.generate(proto, revmap, key, utils)
     -- Anti-tamper 10: coroutine library basic check
     LF("do if type(coroutine)~='table' or type(coroutine.wrap)~='function' then error('Catify: environment tampered (coroutine)',0) end end")
 
+    -- Anti-keylogger 1: no active debug hook (more thorough check)
+    LF("do local %s", atKl1)
+    LF("  pcall(function() local _d=rawget(_ENV,'debug');if _d and type(_d.gethook)=='function' then %s=_d.gethook() end end)", atKl1)
+    LF("  if %s~=nil then error('Catify: keylogger detected',0) end end", atKl1)
+
+    -- Anti-keylogger 2: io library integrity (keyloggers may replace io.read/write)
+    LF("do local %s=rawget(_ENV,'io');if %s~=nil and(type(%s.read)~='function' or type(%s.write)~='function')then error('Catify: keylogger detected (io)',0)end end",
+       atKl2, atKl2, atKl2, atKl2)
+
+    -- Anti-keylogger 3: string metatable not tampered
+    LF("do local %s=getmetatable('');if %s~=nil then local _idx=rawget(%s,'__index');if _idx~=nil and type(_idx)~='table' then error('Catify: keylogger detected (strmeta)',0)end end end",
+       atKl3, atKl3, atKl3)
+
+    -- Anti-keylogger 4: pcall/error uncompromised
+    LF("do local %s,_r=pcall(function()return true end);if not %s or _r~=true then error('Catify: keylogger detected (pcall)',0)end end",
+       atKl4, atKl4)
+
+    -- Watermark: obfuscated ASCII cat watermark (sits in memory, never printed)
+    local wm_bytes = {32,32,47,92,95,47,92,32,32,10,32,40,111,46,111,32,41,10,32,32,62,32,94,32,60,10,32,67,97,116,105,102,121,32,118,50,46,48}
+    local wm_parts = {}
+    for i = 1, #wm_bytes do wm_parts[i] = tostring(wm_bytes[i]) end
+    LF("local %s=table.concat((function()local _t={};for _i,_v in ipairs({%s})do _t[_i]=string.char(_v)end;return _t end)())",
+       vWm, table.concat(wm_parts, ","))
+
     -- Decrypt and deserialize
-    LF("%s=%s(%s,%s)", vBlob, vDecrypt, vBlob, vKey)
-    LF("%s=nil;%s=nil", vKey, vDecrypt)   -- wipe key and decryptor
+    LF("%s=%s(%s,%s,%s)", vBlob, vDecrypt, vBlob, vKey, vNonce)
+    LF("%s=nil;%s=nil;%s=nil", vKey, vNonce, vDecrypt)   -- wipe key, nonce, decryptor
     LF("%s=1", dPos)
     LF("%s=%s", dData, vBlob)
     LF("local %s=%s()", vProto, vLoadProto)

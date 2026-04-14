@@ -32,7 +32,7 @@ local BANNER = [[
  | |   / _` | __| | |_| | | |
  | |__| (_| | |_| |  _| |_| |
   \____\__,_|\__|_|_|  \__, |
-                        |___/   v1.0.0 — Commercial Lua Obfuscator
+                        |___/   v2.0.0 — Commercial Lua Obfuscator
 
   Options:
     --seed N        Use fixed random seed N (for reproducible output)
@@ -175,8 +175,9 @@ local function main(argv)
     for pass = 1, opts.passes do
         info("Obfuscation pass %d/%d...", pass, opts.passes)
 
-        -- Generate a fresh random RC4 key per pass
-        local key    = Utils.rand_key(math.random(24, 48))
+        -- Generate a fresh random AES-256 key + nonce per pass
+        local key    = Utils.rand_key(32)
+        local nonce  = Utils.rand_nonce()
         local pass_opts = {
             junk_count = opts.junk_count,   -- nil → random within intensity range
             junk_min   = irange.min,
@@ -190,7 +191,7 @@ local function main(argv)
 
         -- Generate VM + encrypted output
         info("  Generating VM code...")
-        local generated = VmGen.generate(final_proto, revmap, key, Utils)
+        local generated = VmGen.generate(final_proto, revmap, key, nonce, Utils)
         info("  Generated VM size: %d bytes", #generated)
 
         if pass < opts.passes then
@@ -222,7 +223,7 @@ local function main(argv)
     local output_size   = #result_code
     info("Done!  %d → %d bytes  (%.1fx)",
          original_size, output_size, output_size / math.max(1, original_size))
-    info("Protected with: opcode shuffle, RC4 encryption, debug strip, junk injection (intensity %d), VM dispatch obfuscation, anti-tamper (10 checks)", opts.intensity)
+    info("Protected with: opcode shuffle, AES-256-CTR encryption, SHA-256 integrity, Base91 payload, debug strip, junk injection (intensity %d), VM dispatch obfuscation, anti-tamper (14 checks)", opts.intensity)
 end
 
 main(arg)
