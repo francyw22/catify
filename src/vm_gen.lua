@@ -245,6 +245,12 @@ function VmGen.generate(proto, revmap, key, utils)
     local vStrXor   = vn()   -- string-constant XOR key (second encryption layer)
     local atVer     = vn()   -- Lua version check scratch
     local atRaw     = vn()   -- raw* functions check scratch
+    -- decoy function names
+    local vDecoy    = vn()   -- decoy function (defined, never called)
+    local dkA       = vn()
+    local dkB       = vn()
+    local dkC       = vn()
+    local dkD       = vn()
 
     -- ── 3. Compute CRC32 of the encrypted blob for anti-tamper ──────────────
     local blob_crc = utils.crc32(blob)
@@ -258,11 +264,17 @@ function VmGen.generate(proto, revmap, key, utils)
 
     -- ── 4. Junk-code snippets (opaque predicates, dead branches) ─────────────
     local junk_seed = math.random(10000, 99999)
-    -- Three forms of always-false opaque predicates:
+    -- Eight forms of always-dead opaque predicates / no-op computations:
     --  form 1: x XOR x == 0, never > 0
     --  form 2: n // n == 1, never < 1
     --  form 3: (a+b)*c - (a+b)*c == 0, never > 1
+    --  form 4: #"literal" == known length, dead if branch
+    --  form 5: table constructor immediately discarded, length always 0
+    --  form 6: multi-step XOR chain that cancels to 0
+    --  form 7: math.max(a, b) identity (a >= b, so result == a, dead sub-branch)
+    --  form 8: string rep + len identity (len("#") * n == n)
     local junk_forms = {
+        -- form 1: x XOR x == 0
         function(indent)
             local a = math.random(1, 0x7FFF)
             local b = math.random(1, 0xFF)
@@ -270,6 +282,7 @@ function VmGen.generate(proto, revmap, key, utils)
                 "%sdo local %s=%d*%d;local %s=%s~%s;if %s>0 then %s=%s+%d end end\n",
                 indent, jA, a, b, jB, jA, jA, jB, jA, jA, math.random(1, 0xFF))
         end,
+        -- form 2: integer division identity
         function(indent)
             local a = math.random(2, 0x3FFF)
             local c = math.random(1, 9)
@@ -277,6 +290,7 @@ function VmGen.generate(proto, revmap, key, utils)
                 "%sdo local %s=%d+%d;local %s=%s//%s;if %s<%d then %s=%s*%d end end\n",
                 indent, jA, a, c, jB, jA, jA, jB, 1, jA, jA, math.random(2, 9))
         end,
+        -- form 3: product minus itself
         function(indent)
             local a = math.random(1, 0x1FFF)
             local b = math.random(1, 0x1FFF)
@@ -286,9 +300,57 @@ function VmGen.generate(proto, revmap, key, utils)
                 "%sdo local %s=(%d+%d)*%d;local %s=%s-%d;if %s>1 then %s=%s^2 end end\n",
                 indent, jA, a, b, c, jB, jA, prod, jB, jA, jA)
         end,
+        -- form 4: string length identity (dead branch on impossible length)
+        function(indent)
+            local words = {"catify","obfuscate","runtime","protect","bytecode","virtual"}
+            local w = words[math.random(1, #words)]
+            local wrong_len = #w + math.random(1, 5)
+            return string.format(
+                "%sdo local %s=#%q;if %s==%d then %s=%s*0 end end\n",
+                indent, jA, w, jA, wrong_len, jA, jA)
+        end,
+        -- form 5: empty table, length check always 0
+        function(indent)
+            local n = math.random(1, 9)
+            return string.format(
+                "%sdo local %s={};for %s=1,%d do end;if #%s>0 then %s[1]=nil end end\n",
+                indent, jA, jB, n, jA, jA)
+        end,
+        -- form 6: multi-step XOR chain cancelling to 0
+        function(indent)
+            local x = math.random(1, 0xFFFF)
+            local y = math.random(1, 0xFFFF)
+            local z = x ~ y
+            return string.format(
+                "%sdo local %s=%d;local %s=%d;local %s=%s~%s;if (%s~%s)>0 then %s=%s|1 end end\n",
+                indent, jA, x, jB, y, jC, jA, jB, jC, jA, jB, jB)
+        end,
+        -- form 7: math.max identity (always picks first arg)
+        function(indent)
+            local big = math.random(0x1000, 0x7FFF)
+            local small = math.random(1, big - 1)
+            local wrong = small - math.random(1, small)
+            return string.format(
+                "%sdo local %s=math.max(%d,%d);if %s<%d then %s=%s+1 end end\n",
+                indent, jA, big, small, jA, big, jA, jA)
+        end,
+        -- form 8: string.rep + #  identity
+        function(indent)
+            local ch = string.char(math.random(65, 90))   -- A-Z
+            local n  = math.random(3, 8)
+            return string.format(
+                "%sdo local %s=string.rep(%q,%d);if #%s~=%d then %s=nil end end\n",
+                indent, jA, ch, n, jA, n, jA)
+        end,
     }
     local function junk_stmt(indent)
         return junk_forms[math.random(1, #junk_forms)](indent)
+    end
+    -- Emit `k` consecutive junk statements with the given indent.
+    local function junk_block(indent, k)
+        local out = {}
+        for _ = 1, k do out[#out+1] = junk_stmt(indent) end
+        return table.concat(out)
     end
 
     -- ── 5. Assemble source ────────────────────────────────────────────────────
@@ -307,6 +369,8 @@ function VmGen.generate(proto, revmap, key, utils)
     -- Wrap all VM internals in a do...end block so locals don't pollute global scope
     L("do")
     L("local _=tostring;local __=type;local ___=pcall;local ____=load")
+    -- Junk block at top of do-scope (dead computations, not reachable by any real code path)
+    src[#src+1] = junk_block("", math.random(2, 4))
     LF("local function %s(%s,%s)", vDecrypt, rc4D, rc4K)
     LF("  local %s={}",          rc4S)
     LF("  for %s=0,255 do %s[%s]=%s end", rc4I, rc4S, rc4I, rc4I)
@@ -328,6 +392,20 @@ function VmGen.generate(proto, revmap, key, utils)
     LF("  end")
     LF("  return table.concat(%s)", rc4Out)
     LF("end")
+    -- Junk block between RC4 function and deserializer
+    src[#src+1] = junk_block("", math.random(2, 3))
+    -- Decoy function: looks like a secondary hash/encode but is never called.
+    -- Its body is all dead computation (XOR mixing on random constants).
+    do
+        local da = math.random(1, 0x7FFF)
+        local db = math.random(1, 0x7FFF)
+        local dc = math.random(1, 0xFFFF)
+        LF("local function %s(%s)", vDecoy, dkA)
+        LF("  local %s=%d local %s=%d local %s=%s~%d", dkB, da, dkC, db, dkD, dkA, dc)
+        LF("  for %s=1,#%s do %s=%s~string.byte(%s,%s) end", dkB, dkA, dkC, dkC, dkA, dkB)
+        LF("  return %s~%s", dkC, dkD)
+        LF("end")
+    end
 
     -- Deserializer
     LF("local %s", dPos)
@@ -392,10 +470,14 @@ function VmGen.generate(proto, revmap, key, utils)
 
     -- Revmap (shuffled→real opcode)
     LF("local %s=%s", vRevmap, revmap_lit)
+    -- Junk block after revmap declaration
+    src[#src+1] = junk_block("", math.random(1, 3))
 
     -- The execute function
     LF("local function %s(%s,%s,...)", vExec, eProto, eUpvals)
     LF("  local %s=table.pack(...)", eArgs)
+    -- Junk at function entry
+    src[#src+1] = junk_block("  ", math.random(1, 2))
     -- Allocate register boxes (auto-create missing boxes via metatable)
     LF("  local %s=setmetatable({},{__index=function(t,k) local b={};t[k]=b;return b end})", eRegs)
     -- Pre-fill params and low registers
@@ -593,6 +675,8 @@ function VmGen.generate(proto, revmap, key, utils)
     LF("    end")
     LF("  end")
     LF("end")  -- end execute function
+    -- Junk block after execute function definition
+    src[#src+1] = junk_block("", math.random(2, 4))
 
     -- ── Main: anti-tamper, decrypt, deserialize, run ──────────
     -- The payload table (superflow_bytecode) was already emitted at the top of the file.
@@ -654,6 +738,12 @@ function VmGen.generate(proto, revmap, key, utils)
 
     -- Anti-tamper 8: math library sanity
     LF("do if not math.maxinteger or math.maxinteger<=0 or math.mininteger>=0 then error('Catify: environment tampered (math)',0) end end")
+
+    -- Anti-tamper 9: table library sanity (insert/remove must be callable)
+    LF("do if type(table.insert)~='function' or type(table.remove)~='function' or type(table.concat)~='function' then error('Catify: environment tampered (tablelib)',0) end end")
+
+    -- Anti-tamper 10: coroutine library basic check
+    LF("do if type(coroutine)~='table' or type(coroutine.wrap)~='function' then error('Catify: environment tampered (coroutine)',0) end end")
 
     -- Decrypt and deserialize
     LF("%s=%s(%s,%s)", vBlob, vDecrypt, vBlob, vKey)

@@ -142,9 +142,13 @@ function Passes.encrypt_strings(proto)
 end
 
 -- ─── Pass 4: Inject junk instructions (opaque predicates) ────────────────────
--- Insert NOP-equivalent instruction sequences (LOADBOOL + JMP 0 patterns)
--- that are unreachable or provably harmless.  This inflates the instruction
--- stream and confuses static decompilers.
+-- Insert NOP-equivalent instruction sequences into the bytecode stream.
+-- Supported junk patterns:
+--   • LOADBOOL R(200) 0 0  – load false into an unreachable high register
+--   • MOVE     R(200) R(200) – copy a high register to itself (identity NOP)
+--   • LOADNIL  R(200) 0    – set a high register range to nil
+-- Each insertion point gets a random cluster of 1-3 junk instructions.
+-- All sBx-based jump targets are corrected for the added instructions.
 
 --- Return a 32-bit Lua 5.3 instruction word (A B C format).
 local function make_inst(op, A, B, C)
@@ -164,14 +168,36 @@ local function set_sbx(inst, new_sbx)
     return op | (A << 6) | (new_bx << 14)
 end
 
---- Insert `count` junk LOADBOOL R(200) 0 0 instructions into proto.code at
---- random positions that are safe with respect to control flow:
+--- Pick a random high register index (200-220) for junk instructions.
+local function junk_reg()
+    return 200 + math.random(0, 20)
+end
+
+--- Build a random single junk instruction using the provided shuffled opcodes.
+---@param junk_ops table  table with .loadbool, .move, .loadnil shuffled opcodes
+---@return integer  encoded instruction word
+local function make_junk_inst(junk_ops)
+    local choice = math.random(1, 3)
+    if choice == 1 then
+        -- LOADBOOL R(hi) 0 0
+        return make_inst(junk_ops.loadbool, junk_reg(), 0, 0)
+    elseif choice == 2 then
+        -- MOVE R(hi) R(hi)  – copy a high register to itself
+        local r = junk_reg()
+        return make_inst(junk_ops.move, r, r, 0)
+    else
+        -- LOADNIL R(hi) 0
+        return make_inst(junk_ops.loadnil, junk_reg(), 0, 0)
+    end
+end
+
+--- Insert junk instruction clusters into proto.code at random safe positions:
 ---   • never between a conditional (EQ/LT/LE/TEST/TESTSET) and the JMP it guards
 ---   • all sBx-based jump targets (JMP, FORLOOP, FORPREP, TFORLOOP) are corrected
 ---   to account for the new instruction positions.
 ---@param proto table   mutated in-place (call after opcode_shuffle)
 ---@param opmap table   opmap[orig_op]=shuffled_op (for junk instruction opcode)
----@param count integer
+---@param count integer number of insertion clusters (each 1-3 instructions)
 function Passes.inject_junk(proto, opmap, count)
     count = count or 3
 
@@ -185,7 +211,12 @@ function Passes.inject_junk(proto, opmap, count)
         for i = 0, 46 do revmap[i] = i end
     end
 
-    local JUNK_OP  = opmap and (opmap[3] or 3) or 3   -- shuffled LOADBOOL
+    -- Gather shuffled opcodes for each junk instruction type
+    local junk_ops = {
+        loadbool = opmap and (opmap[3] or 3) or 3,   -- LOADBOOL
+        move     = opmap and (opmap[0] or 0) or 0,   -- MOVE
+        loadnil  = opmap and (opmap[4] or 4) or 4,   -- LOADNIL
+    }
 
     -- Real opcodes that conditionally skip the next instruction (always a JMP)
     local COND_SKIP = { [31]=true, [32]=true, [33]=true, [34]=true, [35]=true }
@@ -221,28 +252,36 @@ function Passes.inject_junk(proto, opmap, count)
         for j = 1, npts do pts[#pts + 1] = candidates[j] end
         table.sort(pts)
 
-        -- 3. Build old_index → new_index mapping (one junk added before each pt)
+        -- 3. Assign a random cluster size (1-3) to each insertion point
+        local cluster_sizes = {}
+        for j = 1, npts do
+            cluster_sizes[j] = math.random(1, 3)
+        end
+
+        -- 4. Build old_index → new_index mapping (cluster_sizes[pi] junks added before each pt)
         local old_to_new = {}
         local off = 0
         local pi  = 1
         for i = 0, n - 1 do
             if pi <= #pts and pts[pi] == i then
-                off = off + 1
+                off = off + cluster_sizes[pi]
                 pi  = pi  + 1
             end
             old_to_new[i] = i + off
         end
         old_to_new[n] = n + off   -- sentinel (one past end, for forward jumps)
 
-        -- 4. Build new instruction array, fixing sBx in jump instructions
+        -- 5. Build new instruction array, fixing sBx in jump instructions
         local new_code = {}
         local ni = 0
         pi = 1
         for i = 0, n - 1 do
-            -- Prepend junk if this position was chosen
+            -- Prepend junk cluster if this position was chosen
             if pi <= #pts and pts[pi] == i then
-                new_code[ni] = make_inst(JUNK_OP, 200, 0, 0)
-                ni = ni + 1
+                for _ = 1, cluster_sizes[pi] do
+                    new_code[ni] = make_junk_inst(junk_ops)
+                    ni = ni + 1
+                end
                 pi = pi + 1
             end
             local inst = p.code[i]
@@ -295,7 +334,7 @@ function Passes.run_all(proto, utils, opts)
     end
 
     -- 3. Inject junk (after shuffle so junk uses shuffled opcode numbers)
-    local jcount = opts.junk_count or math.random(3, 8)
+    local jcount = opts.junk_count or math.random(opts.junk_min or 5, opts.junk_max or 14)
     Passes.inject_junk(proto, opmap, jcount)
 
     -- 4. String pass (currently no-op)

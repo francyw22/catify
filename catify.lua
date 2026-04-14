@@ -33,7 +33,22 @@ local BANNER = [[
  | |__| (_| | |_| |  _| |_| |
   \____\__,_|\__|_|_|  \__, |
                         |___/   v1.0.0 — Commercial Lua Obfuscator
+
+  Options:
+    --seed N        Use fixed random seed N (for reproducible output)
+    --junk N        Number of junk-cluster insertion points (overrides --intensity)
+    --intensity N   Junk density: 0=minimal 1=normal 2=high 3=extreme (default: 1)
+    --no-strip      Do not strip debug info from the bytecode
+    --passes N      Number of full obfuscation passes (default: 1; max: 3)
 ]]
+
+-- Intensity → junk cluster count ranges
+local INTENSITY_RANGES = {
+    [0] = { min=1,  max=4  },
+    [1] = { min=5,  max=14 },
+    [2] = { min=12, max=24 },
+    [3] = { min=20, max=40 },
+}
 
 -- ─── Argument parsing ─────────────────────────────────────────────────────────
 local function parse_args(argv)
@@ -44,6 +59,7 @@ local function parse_args(argv)
         junk_count = nil,
         strip      = true,
         passes     = 1,
+        intensity  = 1,    -- 0=minimal, 1=normal, 2=high, 3=extreme
     }
     local i = 1
     while i <= #argv do
@@ -61,6 +77,10 @@ local function parse_args(argv)
             i = i + 1
             opts.passes = math.max(1, math.min(3, math.floor(tonumber(argv[i])
                           or error("--passes requires a number"))))
+        elseif a == "--intensity" then
+            i = i + 1
+            opts.intensity = math.max(0, math.min(3, math.floor(tonumber(argv[i])
+                             or error("--intensity requires a number 0-3"))))
         elseif a:sub(1, 2) == "--" then
             error("Unknown option: " .. a)
         elseif not opts.input then
@@ -102,13 +122,13 @@ local function main(argv)
     local ok, opts_or_err = pcall(parse_args, argv)
     if not ok then
         io.stderr:write("Error: " .. tostring(opts_or_err) .. "\n\n")
-        io.stderr:write("Usage: lua catify.lua <input.lua> [output.lua] [--seed N] [--junk N] [--passes N] [--no-strip]\n")
+        io.stderr:write("Usage: lua catify.lua <input.lua> [output.lua] [--seed N] [--junk N] [--intensity N] [--passes N] [--no-strip]\n")
         os.exit(1)
     end
     local opts = opts_or_err
 
     if not opts.input then
-        io.stderr:write("Usage: lua catify.lua <input.lua> [output.lua] [--seed N] [--junk N] [--passes N] [--no-strip]\n")
+        io.stderr:write("Usage: lua catify.lua <input.lua> [output.lua] [--seed N] [--junk N] [--intensity N] [--passes N] [--no-strip]\n")
         os.exit(1)
     end
 
@@ -149,6 +169,8 @@ local function main(argv)
 
     -- ── Stage 3: Obfuscation passes ──────────────────────────────────────────
     local result_code = nil
+    local irange = INTENSITY_RANGES[opts.intensity] or INTENSITY_RANGES[1]
+    info("Intensity: %d  (junk clusters %d-%d per function)", opts.intensity, irange.min, irange.max)
 
     for pass = 1, opts.passes do
         info("Obfuscation pass %d/%d...", pass, opts.passes)
@@ -156,7 +178,9 @@ local function main(argv)
         -- Generate a fresh random RC4 key per pass
         local key    = Utils.rand_key(math.random(24, 48))
         local pass_opts = {
-            junk_count = opts.junk_count,   -- nil → random
+            junk_count = opts.junk_count,   -- nil → random within intensity range
+            junk_min   = irange.min,
+            junk_max   = irange.max,
             strip      = opts.strip,
         }
 
@@ -198,7 +222,7 @@ local function main(argv)
     local output_size   = #result_code
     info("Done!  %d → %d bytes  (%.1fx)",
          original_size, output_size, output_size / math.max(1, original_size))
-    info("Protected with: opcode shuffle, RC4 encryption, debug strip, junk injection, VM dispatch obfuscation")
+    info("Protected with: opcode shuffle, RC4 encryption, debug strip, junk injection (intensity %d), VM dispatch obfuscation, anti-tamper (10 checks)", opts.intensity)
 end
 
 main(arg)
