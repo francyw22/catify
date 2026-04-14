@@ -482,7 +482,11 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- load native Lua 5.3 operators via load() so the Luau parser never sees ~, &, |, <<, >>
     LF("local %s,%s,%s,%s,%s,%s", bXor,bNot,bAnd,bOr,bShl,bShr)
     LF("if type(bit32)=='table' then")
-    LF("  %s=bit32.bxor;%s=bit32.bnot;%s=bit32.band;%s=bit32.bor;%s=bit32.lshift;%s=bit32.rshift", bXor,bNot,bAnd,bOr,bShl,bShr)
+    LF("  %s=bit32.bxor;%s=bit32.bnot;%s=bit32.band;%s=bit32.bor", bXor,bNot,bAnd,bOr)
+    -- bit32.lshift and bit32.rshift were deprecated and may be nil in newer Roblox Luau.
+    -- Fall back to native operators (loaded via load() so the source file stays Luau-parseable).
+    LF("  %s=bit32.lshift or load'return function(a,b)return a<<b end'()", bShl)
+    LF("  %s=bit32.rshift or load'return function(a,b)return a>>b end'()", bShr)
     LF("else")
     LF("  %s=load'return function(a,b)return a~b end'()", bXor)
     LF("  %s=load'return function(a)return ~a end'()", bNot)
