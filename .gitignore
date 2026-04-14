@@ -1,0 +1,12 @@
+# Catify — .gitignore
+
+# Bot secrets (never commit the real config)
+bot/config.lua
+
+# Lua compiled files
+*.luac
+
+# OS / editor noise
+.DS_Store
+*.swp
+*~
