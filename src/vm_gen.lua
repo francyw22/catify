@@ -76,7 +76,9 @@ local function serialize_proto(proto, sxor)
                     w(ser_u8(3))
                     w(packed)
                 else
-                    -- Fallback: store as float (loses precision for |c| > 2^53)
+                    -- Fallback: store as float.  Integers whose magnitude exceeds
+                    -- 2^53 cannot be exactly represented as doubles; in practice
+                    -- Lua integer constants in real scripts are well within that range.
                     w(ser_u8(4))
                     w(ser_f64(c * 1.0))
                 end
@@ -425,7 +427,8 @@ function VmGen.generate(proto, revmap, key, utils)
     LF("local function %s() local v,p=string.unpack('<i4',%s,%s);%s=p;return v end", dRi32, dData, dPos, dPos)
     -- dRi64: detect at runtime whether '<i8' unpack works (64-bit Lua / Roblox),
     -- and fall back to double arithmetic for 32-bit platforms.
-    -- The probe value (2^31 as LE bytes) fails on 32-bit Lua but succeeds elsewhere.
+    -- Probe: bytes \0\0\0\128\0\0\0\0 are LE 0x0000000080000000 = 2^31 as i64.
+    -- That value exceeds the 32-bit signed range, so the pcall fails on 32-bit Lua.
     LF("local _i8ok=(function() local ok=pcall(string.unpack,'<i8','\\0\\0\\0\\128\\0\\0\\0\\0',1);return ok end)()")
     LF("local function %s()", dRi64)
     LF("  if _i8ok then local _v,_p=string.unpack('<i8',%s,%s);%s=_p;return _v end", dData, dPos, dPos)
@@ -831,7 +834,11 @@ function VmGen.generate(proto, revmap, key, utils)
     local full = table.concat(src)
     local compact_lines = {}
     for line in full:gmatch("[^\n]+") do
-        local trimmed = line:match("^%s*(.-)%s*$")
+        -- Strip leading whitespace, then strip trailing whitespace separately
+        local trimmed = line:match("^%s*(.+)$")
+        if trimmed then
+            trimmed = trimmed:match("^(.-)%s*$")
+        end
         if trimmed and trimmed ~= "" then
             compact_lines[#compact_lines + 1] = trimmed
         end

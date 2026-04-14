@@ -52,16 +52,23 @@ function Reader:read_uint32()
     return v
 end
 
+-- Powers-of-two constants used by the 32-bit integer fallback
+local _TWO32 = 4294967296.0      -- 2^32
+local _TWO31 = 2147483648        -- 2^31  (high-bit threshold for sign detection)
+local _TWO64 = 18446744073709551616.0  -- 2^64
+
 function Reader:read_int64()
     -- Try signed 64-bit first (works on 64-bit Lua 5.3+)
     local ok, v, p = pcall(string.unpack, "<i8", self.data, self.pos)
     if ok then self.pos = p; return v end
-    -- Fallback for 32-bit Lua: read as two unsigned 32-bit halves and combine
+    -- Fallback for 32-bit Lua: read as two unsigned 32-bit halves and combine.
+    -- Integers beyond ±2^53 cannot be represented exactly as doubles, but valid
+    -- Lua integer constants in practice are well within that range.
     local lo, p2 = string.unpack("<I4", self.data, self.pos)
     local hi, p3 = string.unpack("<I4", self.data, p2)
     self.pos = p3
-    local val = lo + hi * 4294967296.0
-    if hi >= 2147483648 then val = val - 18446744073709551616.0 end
+    local val = lo + hi * _TWO32
+    if hi >= _TWO31 then val = val - _TWO64 end
     return val
 end
 
