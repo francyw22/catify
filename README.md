@@ -11,12 +11,14 @@ heavily protected VM bytecode — matching the `superflow_bytecode` format used 
 |---|---|
 | **Custom VM** | Full Lua 5.3 VM in generated source; all 47 opcodes implemented |
 | **Opcode shuffle** | Real opcode numbers replaced by random shuffled IDs per output |
-| **RC4 encryption** | Bytecode payload encrypted; key embedded in obfuscated form |
-| **`superflow_bytecode`** | Chunked payload table identical to the Luarmor V4 reference format |
-| **CRC-32 integrity** | Runtime CRC-32 check on the encrypted blob — exits on tampering |
+| **AES-256-CTR encryption** | Bytecode payload encrypted with a fresh 32-byte key + 8-byte nonce per run |
+| **Base91 payload** | Encrypted blob encoded as a single compact Base91 string (`superflow_bytecode`) |
+| **SHA-256 integrity** | Runtime SHA-256 check on the encrypted blob (8 obfuscated word comparisons) |
+| **Anti-keylogger checks** | 4 runtime checks: debug hook, io library, string metatable, pcall integrity |
 | **Debug-hook detection** | Detects `debug.sethook` / `debug.getinfo` usage at runtime |
 | **Environment check** | Verifies critical globals (`tostring`, `type`, `string`, …) are intact |
 | **Junk injection** | Dead-code statements sprinkled throughout the VM dispatch loop |
+| **ASCII cat watermark** | Obfuscated watermark string embedded in generated output |
 
 ---
 
@@ -89,14 +91,17 @@ chat command.
 The generated file looks like:
 
 ```lua
---[[
-    Catify — Lua Script Protector
-    https://github.com/francyw22/catempire
-]]
-superflow_bytecode={"\152\168\186...", "\33\31\156..."};
+superflow_bytecode="ABCDEFGHIJKLMNOPQRSTUVWXYZab..." -- Base91-encoded encrypted payload
 do
-local function <RC4_decrypt>(...) ... end
--- deserializer, VM execute function, anti-tamper checks …
+local <b91_alpha>="ABCDEFGHIJKLMNOPQRSTUVWXYZabc..."
+local function <b91_dec>(...) ... end   -- Base91 decoder
+local <aes_sbox>={[0]=99,124,...}       -- AES S-box
+local function <aes_xtime>(...) ... end
+local function <aes_key_expand>(...) ... end
+local function <aes_enc_block>(...) ... end
+local function <aes_ctr_decrypt>(...) ... end  -- AES-256-CTR
+-- SHA-256 integrity check, anti-keylogger checks …
+-- deserializer, VM execute function …
 end
 ```
 
@@ -110,7 +115,7 @@ src/
   parser.lua        – Lua 5.3 bytecode parser
   passes.lua        – Obfuscation passes (opcode shuffle, junk injection…)
   vm_gen.lua        – VM source code generator
-  utils.lua         – RC4, CRC-32, random name generator
+  utils.lua         – AES-256-CTR, SHA-256, Base91, CRC-32, random name generator
 bot/
   discord_bot.js    – discord.js (Node.js) Discord bot
   package.json      – Node.js dependencies
