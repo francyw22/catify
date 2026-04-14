@@ -255,10 +255,6 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local eStep     = vn()
     local eI        = vn()
     local eT        = vn()
-    -- spare names for junk code
-    local jA        = vn()
-    local jB        = vn()
-    local jC        = vn()
     -- anti-tamper names (atPayload is now the fixed string "superflow_bytecode")
     local atCrc     = vn()   -- expected CRC variable
     local atCalc    = vn()   -- computed CRC variable
@@ -306,8 +302,29 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local revmap_lit = "{" .. table.concat(revmap_parts, ",") .. "}"
 
     -- ── 4. Junk-code snippets (opaque predicates, dead branches) ─────────────
-    local junk_seed = math.random(10000, 99999)
-    -- Eight forms of always-dead opaque predicates / no-op computations:
+    -- Each form picks its own fresh single-letter or short names so that
+    -- consecutive junk blocks never share the same variable identifiers.
+    -- Fifteen human-style single/two-letter names to draw from; forms pick
+    -- 2-3 distinct ones so the pattern varies visually.
+    local _JN = {"x","y","n","v","t","a","b","s","c","r","m","p","q","k","e"}
+    local function jpick()
+        return _JN[math.random(1, #_JN)]
+    end
+    local function jpick2()
+        local i = math.random(1, #_JN)
+        local j = math.random(1, #_JN - 1)
+        if j >= i then j = j + 1 end
+        return _JN[i], _JN[j]
+    end
+    local function jpick3()
+        local i = math.random(1, #_JN)
+        local j, k2
+        repeat j = math.random(1, #_JN) until j ~= i
+        repeat k2 = math.random(1, #_JN) until k2 ~= i and k2 ~= j
+        return _JN[i], _JN[j], _JN[k2]
+    end
+
+    -- Ten forms of always-dead opaque predicates / no-op computations:
     --  form 1: x XOR x == 0, never > 0
     --  form 2: n // n == 1, never < 1
     --  form 3: (a+b)*c - (a+b)*c == 0, never > 1
@@ -315,91 +332,103 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     --  form 5: table constructor immediately discarded, length always 0
     --  form 6: multi-step XOR chain that cancels to 0
     --  form 7: math.max(a, b) identity (a >= b, so result == a, dead sub-branch)
-    --  form 8: string rep + len identity (len("#") * n == n)
+    --  form 8: string.rep + #  identity
+    --  form 9: fake config table with dead branch (looks like real init code)
+    --  form 10: fake string sanitize (dead upper/lower branch)
     local junk_forms = {
         -- form 1: x XOR x == 0
         function(indent)
+            local v1, v2 = jpick2()
             local a = math.random(1, 0x7FFF)
             local b = math.random(1, 0xFF)
             return string.format(
                 "%sdo local %s=%d*%d;local %s=%s~%s;if %s>0 then %s=%s+%d end end\n",
-                indent, jA, a, b, jB, jA, jA, jB, jA, jA, math.random(1, 0xFF))
+                indent, v1, a, b, v2, v1, v1, v2, v1, v1, math.random(1, 0xFF))
         end,
         -- form 2: integer division identity
         function(indent)
+            local v1, v2 = jpick2()
             local a = math.random(2, 0x3FFF)
             local c = math.random(1, 9)
             return string.format(
                 "%sdo local %s=%d+%d;local %s=%s//%s;if %s<%d then %s=%s*%d end end\n",
-                indent, jA, a, c, jB, jA, jA, jB, 1, jA, jA, math.random(2, 9))
+                indent, v1, a, c, v2, v1, v1, v2, 1, v1, v1, math.random(2, 9))
         end,
         -- form 3: product minus itself
         function(indent)
+            local v1, v2 = jpick2()
             local a = math.random(1, 0x1FFF)
             local b = math.random(1, 0x1FFF)
             local c = math.random(1, 7)
             local prod = (a + b) * c
             return string.format(
                 "%sdo local %s=(%d+%d)*%d;local %s=%s-%d;if %s>1 then %s=%s^2 end end\n",
-                indent, jA, a, b, c, jB, jA, prod, jB, jA, jA)
+                indent, v1, a, b, c, v2, v1, prod, v2, v1, v1)
         end,
         -- form 4: string length identity (dead branch on impossible length)
         function(indent)
-            local words = {"catify","obfuscate","runtime","protect","bytecode","virtual"}
+            local v1 = jpick()
+            local words = {"cache","token","handle","driver","plugin","loader"}
             local w = words[math.random(1, #words)]
             local wrong_len = #w + math.random(1, 5)
             return string.format(
                 "%sdo local %s=#%q;if %s==%d then %s=%s*0 end end\n",
-                indent, jA, w, jA, wrong_len, jA, jA)
+                indent, v1, w, v1, wrong_len, v1, v1)
         end,
         -- form 5: empty table, length check always 0
         function(indent)
+            local v1, v2 = jpick2()
             local n = math.random(1, 9)
             return string.format(
                 "%sdo local %s={};for %s=1,%d do end;if #%s>0 then %s[1]=nil end end\n",
-                indent, jA, jB, n, jA, jA)
+                indent, v1, v2, n, v1, v1)
         end,
         -- form 6: multi-step XOR chain cancelling to 0
         function(indent)
+            local v1, v2, v3 = jpick3()
             local x = math.random(1, 0xFFFF)
             local y = math.random(1, 0xFFFF)
             local z = x ~ y
             return string.format(
                 "%sdo local %s=%d;local %s=%d;local %s=%s~%s;if (%s~%s)>0 then %s=%s|1 end end\n",
-                indent, jA, x, jB, y, jC, jA, jB, jC, jA, jB, jB)
+                indent, v1, x, v2, y, v3, v1, v2, v3, v1, v2, v2)
         end,
         -- form 7: math.max identity (always picks first arg)
         function(indent)
+            local v1 = jpick()
             local big = math.random(0x1000, 0x7FFF)
             local small = math.random(1, big - 1)
             return string.format(
                 "%sdo local %s=math.max(%d,%d);if %s<%d then %s=%s+1 end end\n",
-                indent, jA, big, small, jA, big, jA, jA)
+                indent, v1, big, small, v1, big, v1, v1)
         end,
         -- form 8: string.rep + #  identity
         function(indent)
-            local ch = string.char(math.random(65, 90))   -- A-Z
+            local v1 = jpick()
+            local ch = string.char(math.random(97, 122))   -- a-z
             local n  = math.random(3, 8)
             return string.format(
                 "%sdo local %s=string.rep(%q,%d);if #%s~=%d then %s=nil end end\n",
-                indent, jA, ch, n, jA, n, jA)
+                indent, v1, ch, n, v1, n, v1)
         end,
         -- form 9: fake config table with dead branch (looks like real init code)
         function(indent)
+            local v1 = jpick()
             local cfg_keys = {"timeout","retries","verbose","mode","level","limit"}
             local k = cfg_keys[math.random(1, #cfg_keys)]
             local v = math.random(0, 1) == 1 and "true" or tostring(math.random(1,9))
             return string.format(
                 "%sdo local %s={%s=%s};if %s.%s==nil then %s.%s=%s end end\n",
-                indent, jA, k, v, jA, k, jA, k, v)
+                indent, v1, k, v, v1, k, v1, k, v)
         end,
         -- form 10: fake string sanitize (dead upper/lower branch)
         function(indent)
+            local v1, v2 = jpick2()
             local words = {"data","value","result","output","buffer","token"}
             local w = words[math.random(1, #words)]
             return string.format(
                 "%sdo local %s=%q;local %s=string.upper(%s);if #%s<0 then %s=%s end end\n",
-                indent, jA, w, jB, jA, jB, jA, jB)
+                indent, v1, w, v2, v1, v2, v1, v2)
         end,
     }
     local function junk_stmt(indent)
@@ -916,23 +945,31 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
        atVer, atVer, atVer, atVer, atVer)
 
     -- Anti-tamper 5: core standard functions must be genuine callable values
-    LF("do local %s={rawequal,rawget,rawset,rawlen,select,ipairs,pairs,next,unpack or table.unpack};for _,_f in ipairs(%s) do if type(_f)~='function' then error('Catify: environment tampered (core)',0) end end end",
+    LF("do local %s={rawequal,rawget,rawset,rawlen,select,ipairs,pairs,next,table.unpack or unpack};for _,_f in ipairs(%s) do if type(_f)~='function' then error('Catify: environment tampered (core)',0) end end end",
        atRaw, atRaw)
 
     -- Anti-tamper 6: type() sanity (standard type names must not be overridden)
-    LF("do if type(nil)~='nil' or type(0)~='number' or type('')~='string' or type({})~='table' or type(type)~='function' then error('Catify: environment tampered (type)',0) end end")
+    if math.random(1, 2) == 1 then
+        LF("do if type(nil)~='nil' or type(0)~='number' or type('')~='string' or type({})~='table' or type(type)~='function' then error('Catify: environment tampered (type)',0) end end")
+    end
 
     -- Anti-tamper 7: string standard library sanity
     LF("do if string.byte('A')~=65 or string.char(65)~='A' or string.len('ab')~=2 then error('Catify: environment tampered (strlib)',0) end end")
 
     -- Anti-tamper 8: math library sanity (math.pi is universal; maxinteger absent in Luau)
-    LF("do if type(math.pi)~='number' or math.pi<=3 or math.pi>=4 or type(math.abs)~='function' then error('Catify: environment tampered (math)',0) end end")
+    if math.random(1, 2) == 1 then
+        LF("do if type(math.pi)~='number' or math.pi<=3 or math.pi>=4 or type(math.abs)~='function' then error('Catify: environment tampered (math)',0) end end")
+    end
 
     -- Anti-tamper 9: table library sanity (insert/remove must be callable)
-    LF("do if type(table.insert)~='function' or type(table.remove)~='function' or type(table.concat)~='function' then error('Catify: environment tampered (tablelib)',0) end end")
+    if math.random(1, 2) == 1 then
+        LF("do if type(table.insert)~='function' or type(table.remove)~='function' or type(table.concat)~='function' then error('Catify: environment tampered (tablelib)',0) end end")
+    end
 
     -- Anti-tamper 10: coroutine library basic check
-    LF("do if type(coroutine)~='table' or type(coroutine.wrap)~='function' then error('Catify: environment tampered (coroutine)',0) end end")
+    if math.random(1, 2) == 1 then
+        LF("do if type(coroutine)~='table' or type(coroutine.wrap)~='function' then error('Catify: environment tampered (coroutine)',0) end end")
+    end
 
     -- Anti-keylogger 1: no active debug hook (more thorough check)
     LF("do local %s", atKl1)
@@ -940,28 +977,41 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("  if %s~=nil then error('Catify: keylogger detected',0) end end", atKl1)
 
     -- Anti-keylogger 2: io library integrity (keyloggers may replace io.read/write)
-    LF("do local %s=rawget(_ENV,'io');if %s~=nil and(type(%s.read)~='function' or type(%s.write)~='function')then error('Catify: keylogger detected (io)',0)end end",
-       atKl2, atKl2, atKl2, atKl2)
+    -- io is nil in Roblox, so the nil guard makes this a no-op there.
+    if math.random(1, 2) == 1 then
+        LF("do local %s=rawget(_ENV,'io');if %s~=nil and(type(%s.read)~='function' or type(%s.write)~='function')then error('Catify: keylogger detected (io)',0)end end",
+           atKl2, atKl2, atKl2, atKl2)
+    end
 
     -- Anti-keylogger 3: string metatable not tampered
-    LF("do local %s=getmetatable('');if %s~=nil then local _idx=rawget(%s,'__index');if _idx~=nil and type(_idx)~='table' then error('Catify: keylogger detected (strmeta)',0)end end end",
-       atKl3, atKl3, atKl3)
+    if math.random(1, 2) == 1 then
+        LF("do local %s=getmetatable('');if %s~=nil then local _idx=rawget(%s,'__index');if _idx~=nil and type(_idx)~='table' then error('Catify: keylogger detected (strmeta)',0)end end end",
+           atKl3, atKl3, atKl3)
+    end
 
     -- Anti-keylogger 4: pcall/error uncompromised
     LF("do local %s,_r=pcall(function()return true end);if not %s or _r~=true then error('Catify: keylogger detected (pcall)',0)end end",
        atKl4, atKl4)
 
     -- Anti-environmental logger 1: detect _G/_ENV monitoring via metamethod proxy
-    LF("do local %s=getmetatable(_G or _ENV);if %s~=nil then if rawget(%s,'__newindex')~=nil or rawget(%s,'__index')~=nil then error('Catify: env logger detected',0)end end end",
-       atEnv1, atEnv1, atEnv1, atEnv1)
+    if math.random(1, 2) == 1 then
+        LF("do local %s=getmetatable(_G or _ENV);if %s~=nil then if rawget(%s,'__newindex')~=nil or rawget(%s,'__index')~=nil then error('Catify: env logger detected',0)end end end",
+           atEnv1, atEnv1, atEnv1, atEnv1)
+    end
 
-    -- Anti-environmental logger 2: os library must not be replaced or wrapped
-    LF("do local %s=rawget(_ENV,'os');if %s~=nil then if type(%s.getenv)~='function' or type(%s.time)~='function' then error('Catify: env tampered (os)',0)end end end",
-       atEnv2, atEnv2, atEnv2, atEnv2)
+    -- Anti-environmental logger 2: os library integrity check.
+    -- Roblox has os.time and os.clock but NOT os.getenv, so we only check
+    -- the two functions that are guaranteed to exist on all supported platforms.
+    if math.random(1, 2) == 1 then
+        LF("do local %s=rawget(_ENV,'os');if %s~=nil then if type(%s.time)~='function' or type(%s.clock)~='function' then error('Catify: env tampered (os)',0)end end end",
+           atEnv2, atEnv2, atEnv2, atEnv2)
+    end
 
     -- Anti-environmental logger 3: numbers must not have a metatable (some loggers patch this)
-    LF("do local %s=getmetatable(0);if %s~=nil then error('Catify: env logger detected (nummt)',0)end end",
-       atEnv3, atEnv3)
+    if math.random(1, 2) == 1 then
+        LF("do local %s=getmetatable(0);if %s~=nil then error('Catify: env logger detected (nummt)',0)end end",
+           atEnv3, atEnv3)
+    end
 
     -- Watermark: obfuscated ASCII cat watermark (sits in memory, never printed)
     local wm_bytes = {32,32,47,92,95,47,92,32,32,10,32,40,111,46,111,32,41,10,32,32,62,32,94,32,60,10,32,67,97,116,105,102,121,32,118,50,46,48}

@@ -8,23 +8,58 @@ local Utils = {}
 -- ─── Random identifiers ──────────────────────────────────────────────────────
 
 local ALPHA = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-local ALNUM = ALPHA .. "0123456789_"
+local ALPHA_LO = "abcdefghijklmnopqrstuvwxyz"
 
---- Generate a single random valid Lua identifier
----@param min_len integer
----@param max_len integer
+-- Word parts used for human-style camelCase / compound names.
+-- Enough variety to produce >5000 unique combinations without collision.
+local _NAME_A = {
+    "get","set","has","run","load","save","make","check","read","find",
+    "calc","init","push","pull","put","add","try","use","raw","cur",
+    "next","last","base","open","send","recv","emit","bind","wrap","cast",
+}
+local _NAME_B = {
+    "Val","Buf","Len","Idx","Ref","Data","State","Count","Flag","Key",
+    "Hash","Map","List","Node","Item","Base","Type","Mode","Step","Size",
+    "Cap","Pos","Off","Src","Dst","Out","Ret","Tag","Ptr","Slot",
+}
+
+--- Generate a single random valid Lua identifier with human-like appearance.
+--- Three styles are chosen randomly each call:
+---   1) camelCase  – e.g. "getState", "loadKey3"
+---   2) compound   – e.g. "bufLen", "srcPos7"
+---   3) alpha-only – e.g. "mxrptv" (fallback, guarantees uniqueness)
+---@param min_len integer  ignored for styles 1-2, used for style 3
+---@param max_len integer  ignored for styles 1-2, used for style 3
 function Utils.rand_name(min_len, max_len)
-    min_len = min_len or 6
-    max_len = max_len or 14
-    local len = math.random(min_len, max_len)
-    local buf = {}
-    local p0 = math.random(1, #ALPHA)
-    buf[1] = ALPHA:sub(p0, p0)
-    for i = 2, len do
-        local p = math.random(1, #ALNUM)
-        buf[i] = ALNUM:sub(p, p)
+    local style = math.random(1, 3)
+    if style == 1 then
+        -- camelCase: verb + Noun, optional trailing digit
+        local s = _NAME_A[math.random(1, #_NAME_A)] .. _NAME_B[math.random(1, #_NAME_B)]
+        if math.random(1, 4) == 1 then s = s .. math.random(2, 9) end
+        return s
+    elseif style == 2 then
+        -- compound lower: two short words, second capitalised, optional digit
+        local a = _NAME_A[math.random(1, #_NAME_A)]
+        local b = _NAME_B[math.random(1, #_NAME_B)]:lower()
+        local s = a .. b:sub(1,1):upper() .. b:sub(2)
+        if math.random(1, 5) == 1 then s = s .. math.random(2, 9) end
+        return s
+    else
+        -- Pure alpha, no digits mid-name; letters only, occasional digit suffix.
+        min_len = min_len or 4
+        max_len = max_len or 9
+        local len = math.random(min_len, max_len)
+        local buf = {}
+        local p0 = math.random(1, #ALPHA_LO)
+        buf[1] = ALPHA_LO:sub(p0, p0)
+        for i = 2, len do
+            local p = math.random(1, #ALPHA)
+            buf[i] = ALPHA:sub(p, p)
+        end
+        -- Rare trailing digit (not mid-name)
+        if math.random(1, 6) == 1 then buf[len + 1] = tostring(math.random(2, 9)) end
+        return table.concat(buf)
     end
-    return table.concat(buf)
 end
 
 --- Generate `count` unique random identifiers (no collisions)
@@ -202,24 +237,36 @@ function Utils.obfuscate_int(n)
 end
 
 --- Return a complex multi-layer Lua expression that evaluates to integer n.
---- Uses XOR-split encoding (a ~ (a ~ n) == n) with additive noise so the
---- value is not trivially visible to a static decompiler.
+--- Uses XOR-split encoding (a ~ (a ~ n) == n) with optional additive noise
+--- chosen from several patterns so the structure varies per call.
 ---@param n integer  (any Lua integer, including large unsigned 32-bit values)
 ---@return string    Lua expression string
 function Utils.obfuscate_int_deep(n)
     -- XOR split: let a = random, b = a XOR n → a XOR b == n
     local a = math.random(0, 0x3FFFFFFF)
     local b = a ~ n
-    -- Additive noise: p + q − q cancels, but written as separate literals so
-    -- a decompiler cannot trivially constant-fold the full expression.
-    local p = math.random(1, 0xFFFF)
-    local q = math.random(1, 0xFFFF)
-    -- Final: (a ~ b) + (p + q) - p - q  ==  n
-    return string.format("((%d~%d)+%d+%d-%d-%d)", a, b, p, q, p, q)
+    local form = math.random(1, 4)
+    if form == 1 then
+        -- No noise: bare XOR pair
+        return string.format("(%d~%d)", a, b)
+    elseif form == 2 then
+        -- Noise inside second operand: a ~ (b + p - p)
+        local p = math.random(1, 0x7FFF)
+        return string.format("(%d~(%d+%d-%d))", a, b, p, p)
+    elseif form == 3 then
+        -- Noise around result: (a ~ b) + p - p
+        local p = math.random(1, 0x7FFF)
+        return string.format("((%d~%d)+%d-%d)", a, b, p, p)
+    else
+        -- Double-cancel noise: (a ~ b) + p + q - p - q
+        local p = math.random(1, 0x7FFF)
+        local q = math.random(1, 0x7FFF)
+        return string.format("((%d~%d)+%d+%d-%d-%d)", a, b, p, q, p, q)
+    end
 end
 
---- Return a triple-layer XOR expression (with additive noise) that evaluates to integer n.
---- Harder to constant-fold than obfuscate_int_deep because of the extra XOR layer.
+--- Return a triple-layer XOR expression (with optional additive noise) that evaluates to integer n.
+--- Noise form is randomised so the pattern differs from obfuscate_int_deep.
 ---@param n integer
 ---@return string  Lua expression string
 function Utils.obfuscate_int_triple(n)
@@ -227,10 +274,19 @@ function Utils.obfuscate_int_triple(n)
     local b = a ~ n
     local c = math.random(0, 0x1FFFFFFF)
     local d = c ~ b
-    local p = math.random(1, 0x7FFF)
-    local q = math.random(1, 0x7FFF)
-    -- (a ~ (c ~ d)) ~ b  ==  a ~ b  ==  n, wrapped in +p-p noise
-    return string.format("((%d~(%d~%d))~%d+%d-%d)", a, c, d, b, p, p)
+    -- (a ~ (c ~ d)) ~ b  ==  a ~ b  ==  n
+    local form = math.random(1, 3)
+    if form == 1 then
+        -- bare triple
+        return string.format("((%d~(%d~%d))~%d)", a, c, d, b)
+    elseif form == 2 then
+        local p = math.random(1, 0x7FFF)
+        return string.format("((%d~(%d~%d))~%d+%d-%d)", a, c, d, b, p, p)
+    else
+        local p = math.random(1, 0x3FFF)
+        local q = math.random(1, 0x3FFF)
+        return string.format("((%d~(%d~%d+%d-%d))~%d)", a, c, d, p, p, b)
+    end
 end
 
 
