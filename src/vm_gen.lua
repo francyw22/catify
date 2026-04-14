@@ -642,8 +642,8 @@ function VmGen.generate(proto, revmap, key, utils)
     LF("do local %s=_VERSION;if not %s or (not %s:find('5%%.3') and not %s:find('5%%.4')) then error('Catify: unsupported Lua version',0) end end",
        atVer, atVer, atVer, atVer)
 
-    -- Anti-tamper 5: rawequal / rawget / rawset must be genuine functions
-    LF("do local %s={rawequal,rawget,rawset,rawlen,select,ipairs,pairs,next,unpack or table.unpack};for _,_f in ipairs(%s) do if type(_f)~='function' then error('Catify: environment tampered (raw)',0) end end end",
+    -- Anti-tamper 5: core standard functions must be genuine callable values
+    LF("do local %s={rawequal,rawget,rawset,rawlen,select,ipairs,pairs,next,unpack or table.unpack};for _,_f in ipairs(%s) do if type(_f)~='function' then error('Catify: environment tampered (core)',0) end end end",
        atRaw, atRaw)
 
     -- Anti-tamper 6: type() sanity (standard type names must not be overridden)
