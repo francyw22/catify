@@ -218,8 +218,8 @@ function Utils.obfuscate_int_deep(n)
     return string.format("((%d~%d)+%d+%d-%d-%d)", a, b, p, q, p, q)
 end
 
---- Return a triple-layer XOR+add expression that evaluates to integer n.
---- Harder to constant-fold than obfuscate_int_deep because of the extra layer.
+--- Return a triple-layer XOR expression (with additive noise) that evaluates to integer n.
+--- Harder to constant-fold than obfuscate_int_deep because of the extra XOR layer.
 ---@param n integer
 ---@return string  Lua expression string
 function Utils.obfuscate_int_triple(n)
