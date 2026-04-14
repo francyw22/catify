@@ -59,12 +59,18 @@ const CATIFY_CLI = path.resolve(__dirname, "..", "catify.lua");
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
-/** Strip ```lua … ``` or ``` … ``` code-fence markdown from a Discord message. */
+/** Strip ```lua … ``` or ``` … ``` or `…` code-fence markdown from a Discord message. */
 function stripCodeFence(text) {
-    return text
+    // Strip triple backtick code fences (e.g. ```lua\n...\n```)
+    text = text
         .replace(/^```[a-zA-Z]*\s*/, "")
         .replace(/\s*```\s*$/, "")
         .trim();
+    // Strip single backtick inline code (e.g. `print("hello")`)
+    if (text.startsWith("`") && text.endsWith("`") && text.length >= 2) {
+        text = text.slice(1, -1);
+    }
+    return text;
 }
 
 /** Truncate a string for safe display inside a Discord message. */
