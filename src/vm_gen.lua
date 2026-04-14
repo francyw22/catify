@@ -273,8 +273,6 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local atEnv3    = vn()
     -- SHA-256 integrity check variable names
     local atSha     = vn()
-    -- Watermark variable name
-    local vWm       = vn()
     -- decoy function names
     local vDecoy    = vn()   -- decoy function (defined, never called)
     local dkA       = vn()
@@ -1013,13 +1011,6 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
            atEnv3, atEnv3)
     end
 
-    -- Watermark: obfuscated ASCII cat watermark (sits in memory, never printed)
-    local wm_bytes = {32,32,47,92,95,47,92,32,32,10,32,40,111,46,111,32,41,10,32,32,62,32,94,32,60,10,32,67,97,116,105,102,121,32,118,50,46,48}
-    local wm_parts = {}
-    for i = 1, #wm_bytes do wm_parts[i] = tostring(wm_bytes[i]) end
-    LF("local %s=table.concat((function()local _t={};for _i,_v in ipairs({%s})do _t[_i]=string.char(_v)end;return _t end)())",
-       vWm, table.concat(wm_parts, ","))
-
     -- Decrypt and deserialize
     LF("%s=%s(%s,%s,%s)", vBlob, vDecrypt, vBlob, vKey, vNonce)
     LF("%s=nil;%s=nil;%s=nil", vKey, vNonce, vDecrypt)   -- wipe key, nonce, decryptor
@@ -1045,15 +1036,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
             compact_lines[#compact_lines + 1] = trimmed
         end
     end
-    -- Prepend ASCII watermark as a block comment at the top of the output file
-    local watermark = "--[[\n"
-        .. "   /\\_/\\  \n"
-        .. "  ( o.o ) \n"
-        .. "   > ^ <  \n"
-        .. "  Catify v2.0.0 -- Protected by Catify\n"
-        .. "  https://github.com/francyw22/catify\n"
-        .. "]]\n"
-    return watermark .. table.concat(compact_lines, " ")
+    return table.concat(compact_lines, " ")
 end
 
 return VmGen
