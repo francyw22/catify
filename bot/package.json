@@ -1,0 +1,16 @@
+{
+  "name": "catify-bot",
+  "version": "1.0.0",
+  "description": "Catify Discord bot — obfuscates Lua scripts on demand",
+  "main": "discord_bot.js",
+  "scripts": {
+    "start": "node discord_bot.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5"
+  }
+}

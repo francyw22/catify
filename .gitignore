@@ -1,7 +1,10 @@
 # Catify — .gitignore
 
-# Bot secrets (never commit the real config)
-bot/config.lua
+# Bot secrets (never commit the real .env)
+bot/.env
+
+# Node.js dependencies
+bot/node_modules/
 
 # Lua compiled files
 *.luac
