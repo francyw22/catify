@@ -67,7 +67,11 @@ function stripCodeFence(text) {
         .replace(/\s*```\s*$/, "")
         .trim();
     // Strip single backtick inline code (e.g. `print("hello")`)
-    if (text.startsWith("`") && text.endsWith("`") && text.length >= 2) {
+    // Only strip when there is exactly one backtick on each side (not `` or ```)
+    if (
+        text.startsWith("`") && text.endsWith("`") && text.length >= 2 &&
+        !text.startsWith("``") && !text.endsWith("``")
+    ) {
         text = text.slice(1, -1);
     }
     return text;
