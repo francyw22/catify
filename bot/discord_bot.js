@@ -35,6 +35,7 @@ const { execFile } = require("child_process");
 const { promisify } = require("util");
 const execFileAsync = promisify(execFile);
 
+const crypto = require("crypto");
 const fs   = require("fs");
 const os   = require("os");
 const path = require("path");
@@ -102,8 +103,9 @@ function downloadUrl(url) {
  */
 async function obfuscate(source, passes) {
     const tmpDir  = os.tmpdir();
-    const inFile  = path.join(tmpDir, `catify_in_${Date.now()}_${Math.random().toString(36).slice(2)}.lua`);
-    const outFile = path.join(tmpDir, `catify_out_${Date.now()}_${Math.random().toString(36).slice(2)}.lua`);
+    const id      = crypto.randomUUID();
+    const inFile  = path.join(tmpDir, `catify_in_${id}.lua`);
+    const outFile = path.join(tmpDir, `catify_out_${id}.lua`);
 
     try {
         fs.writeFileSync(inFile, source, "utf8");
