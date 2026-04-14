@@ -245,6 +245,17 @@ function VmGen.generate(proto, revmap, key, utils)
     local vStrXor   = vn()   -- string-constant XOR key (second encryption layer)
     local atVer     = vn()   -- Lua version check scratch
     local atRaw     = vn()   -- raw* functions check scratch
+    -- decoy function names
+    local vDecoy    = vn()   -- decoy function (defined, never called)
+    local dkA       = vn()
+    local dkB       = vn()
+    local dkC       = vn()
+    local dkD       = vn()
+    -- dispatch table VM state names
+    local vDispatch = vn()   -- opcode dispatch table
+    local eDone     = vn()   -- execution-done flag
+    local eRetVals  = vn()   -- return-values accumulator
+    local eRetN     = vn()   -- number of return values
 
     -- ── 3. Compute CRC32 of the encrypted blob for anti-tamper ──────────────
     local blob_crc = utils.crc32(blob)
@@ -258,11 +269,17 @@ function VmGen.generate(proto, revmap, key, utils)
 
     -- ── 4. Junk-code snippets (opaque predicates, dead branches) ─────────────
     local junk_seed = math.random(10000, 99999)
-    -- Three forms of always-false opaque predicates:
+    -- Eight forms of always-dead opaque predicates / no-op computations:
     --  form 1: x XOR x == 0, never > 0
     --  form 2: n // n == 1, never < 1
     --  form 3: (a+b)*c - (a+b)*c == 0, never > 1
+    --  form 4: #"literal" == known length, dead if branch
+    --  form 5: table constructor immediately discarded, length always 0
+    --  form 6: multi-step XOR chain that cancels to 0
+    --  form 7: math.max(a, b) identity (a >= b, so result == a, dead sub-branch)
+    --  form 8: string rep + len identity (len("#") * n == n)
     local junk_forms = {
+        -- form 1: x XOR x == 0
         function(indent)
             local a = math.random(1, 0x7FFF)
             local b = math.random(1, 0xFF)
@@ -270,6 +287,7 @@ function VmGen.generate(proto, revmap, key, utils)
                 "%sdo local %s=%d*%d;local %s=%s~%s;if %s>0 then %s=%s+%d end end\n",
                 indent, jA, a, b, jB, jA, jA, jB, jA, jA, math.random(1, 0xFF))
         end,
+        -- form 2: integer division identity
         function(indent)
             local a = math.random(2, 0x3FFF)
             local c = math.random(1, 9)
@@ -277,6 +295,7 @@ function VmGen.generate(proto, revmap, key, utils)
                 "%sdo local %s=%d+%d;local %s=%s//%s;if %s<%d then %s=%s*%d end end\n",
                 indent, jA, a, c, jB, jA, jA, jB, 1, jA, jA, math.random(2, 9))
         end,
+        -- form 3: product minus itself
         function(indent)
             local a = math.random(1, 0x1FFF)
             local b = math.random(1, 0x1FFF)
@@ -286,9 +305,56 @@ function VmGen.generate(proto, revmap, key, utils)
                 "%sdo local %s=(%d+%d)*%d;local %s=%s-%d;if %s>1 then %s=%s^2 end end\n",
                 indent, jA, a, b, c, jB, jA, prod, jB, jA, jA)
         end,
+        -- form 4: string length identity (dead branch on impossible length)
+        function(indent)
+            local words = {"catify","obfuscate","runtime","protect","bytecode","virtual"}
+            local w = words[math.random(1, #words)]
+            local wrong_len = #w + math.random(1, 5)
+            return string.format(
+                "%sdo local %s=#%q;if %s==%d then %s=%s*0 end end\n",
+                indent, jA, w, jA, wrong_len, jA, jA)
+        end,
+        -- form 5: empty table, length check always 0
+        function(indent)
+            local n = math.random(1, 9)
+            return string.format(
+                "%sdo local %s={};for %s=1,%d do end;if #%s>0 then %s[1]=nil end end\n",
+                indent, jA, jB, n, jA, jA)
+        end,
+        -- form 6: multi-step XOR chain cancelling to 0
+        function(indent)
+            local x = math.random(1, 0xFFFF)
+            local y = math.random(1, 0xFFFF)
+            local z = x ~ y
+            return string.format(
+                "%sdo local %s=%d;local %s=%d;local %s=%s~%s;if (%s~%s)>0 then %s=%s|1 end end\n",
+                indent, jA, x, jB, y, jC, jA, jB, jC, jA, jB, jB)
+        end,
+        -- form 7: math.max identity (always picks first arg)
+        function(indent)
+            local big = math.random(0x1000, 0x7FFF)
+            local small = math.random(1, big - 1)
+            return string.format(
+                "%sdo local %s=math.max(%d,%d);if %s<%d then %s=%s+1 end end\n",
+                indent, jA, big, small, jA, big, jA, jA)
+        end,
+        -- form 8: string.rep + #  identity
+        function(indent)
+            local ch = string.char(math.random(65, 90))   -- A-Z
+            local n  = math.random(3, 8)
+            return string.format(
+                "%sdo local %s=string.rep(%q,%d);if #%s~=%d then %s=nil end end\n",
+                indent, jA, ch, n, jA, n, jA)
+        end,
     }
     local function junk_stmt(indent)
         return junk_forms[math.random(1, #junk_forms)](indent)
+    end
+    -- Emit `k` consecutive junk statements with the given indent.
+    local function junk_block(indent, k)
+        local out = {}
+        for _ = 1, k do out[#out+1] = junk_stmt(indent) end
+        return table.concat(out)
     end
 
     -- ── 5. Assemble source ────────────────────────────────────────────────────
@@ -307,6 +373,8 @@ function VmGen.generate(proto, revmap, key, utils)
     -- Wrap all VM internals in a do...end block so locals don't pollute global scope
     L("do")
     L("local _=tostring;local __=type;local ___=pcall;local ____=load")
+    -- Junk block at top of do-scope (dead computations, not reachable by any real code path)
+    src[#src+1] = junk_block("", math.random(2, 4))
     LF("local function %s(%s,%s)", vDecrypt, rc4D, rc4K)
     LF("  local %s={}",          rc4S)
     LF("  for %s=0,255 do %s[%s]=%s end", rc4I, rc4S, rc4I, rc4I)
@@ -328,6 +396,20 @@ function VmGen.generate(proto, revmap, key, utils)
     LF("  end")
     LF("  return table.concat(%s)", rc4Out)
     LF("end")
+    -- Junk block between RC4 function and deserializer
+    src[#src+1] = junk_block("", math.random(2, 3))
+    -- Decoy function: looks like a secondary hash/encode but is never called.
+    -- Its body is all dead computation (XOR mixing on random constants).
+    do
+        local da = math.random(1, 0x7FFF)
+        local db = math.random(1, 0x7FFF)
+        local dc = math.random(1, 0xFFFF)
+        LF("local function %s(%s)", vDecoy, dkA)
+        LF("  local %s=%d local %s=%d local %s=%s~%d", dkB, da, dkC, db, dkD, dkA, dc)
+        LF("  for %s=1,#%s do %s=%s~string.byte(%s,%s) end", dkB, dkA, dkC, dkC, dkA, dkB)
+        LF("  return %s~%s", dkC, dkD)
+        LF("end")
+    end
 
     -- Deserializer
     LF("local %s", dPos)
@@ -392,13 +474,16 @@ function VmGen.generate(proto, revmap, key, utils)
 
     -- Revmap (shuffled→real opcode)
     LF("local %s=%s", vRevmap, revmap_lit)
+    -- Junk block after revmap declaration
+    src[#src+1] = junk_block("", math.random(1, 3))
 
-    -- The execute function
+    -- The execute function (dispatch-table based)
     LF("local function %s(%s,%s,...)", vExec, eProto, eUpvals)
     LF("  local %s=table.pack(...)", eArgs)
+    -- Junk at function entry
+    src[#src+1] = junk_block("  ", math.random(1, 2))
     -- Allocate register boxes (auto-create missing boxes via metatable)
     LF("  local %s=setmetatable({},{__index=function(t,k) local b={};t[k]=b;return b end})", eRegs)
-    -- Pre-fill params and low registers
     LF("  for %s=0,%s.maxstacksize+63 do %s[%s]={} end", eI, eProto, eRegs, eI)
     -- Fill params
     LF("  for %s=0,%s.numparams-1 do %s[%s].v=%s[%s+1] end", eI, eProto, eRegs, eI, eArgs, eI)
@@ -408,191 +493,225 @@ function VmGen.generate(proto, revmap, key, utils)
     LF("    for %s=%s.numparams+1,%s.n do %s[#%s+1]=%s[%s] end",
        eI, eProto, eArgs, eVararg, eVararg, eArgs, eI)
     LF("  end")
-    -- Locals
+    -- VM state locals
     LF("  local %s=0", ePc)
     LF("  local %s=-1", eTop)
     LF("  local %s=%s.code",   eCode,   eProto)
     LF("  local %s=%s.k",      eKst,    eProto)
     LF("  local %s=%s.p",      eProtos, eProto)
-    -- rk helper (inline-able)
+    -- Execution-done flag and return-value storage
+    LF("  local %s=false", eDone)
+    LF("  local %s={}", eRetVals)
+    LF("  local %s=0", eRetN)
+    -- rk helper: read register or constant
     LF("  local function %s(x) if x>=256 then return %s[x-256] else return %s[x].v end end",
        eRk, eKst, eRegs)
 
-    -- ── Main dispatch loop (state-machine style) ─────────────────────────────
-    LF("  local %s=0", eState)
-    LF("  while true do")
-    -- Fetch + decode
-    LF("    local %s=%s[%s]", eInst, eCode, ePc)
-    LF("    %s=%s+1", ePc, ePc)
-    LF("    local %s=%s[%s&0x3F]", eOp, vRevmap, eInst)
-    LF("    local %s=(%s>>6)&0xFF",  eA, eInst)
-    LF("    local %s=(%s>>23)&0x1FF",eB, eInst)
-    LF("    local %s=(%s>>14)&0x1FF",eC, eInst)
-    LF("    local %s=(%s>>14)&0x3FFFF",eBx, eInst)
-    LF("    local %s=%s-131071",   eSBx, eBx)
-    -- Junk check (dead code)
-    LF("    %s=%s", eState, eOp)
-    L (junk_stmt("    "))
-    -- Dispatch: split into two blocks to avoid "too many elseifs" in some interpreters
-    LF("    if %s<24 then", eState)
-    LF("      if %s==0 then %s[%s].v=%s[%s].v",        eState, eRegs, eA, eRegs, eB)
-    LF("      elseif %s==1 then %s[%s].v=%s[%s]",      eState, eRegs, eA, eKst,  eBx)
-    -- LOADKX
-    LF("      elseif %s==2 then",                       eState)
-    LF("        local ni=%s[%s];%s=%s+1;%s[%s].v=%s[ni>>6]", eCode, ePc, ePc, ePc, eRegs, eA, eKst)
-    -- LOADBOOL
-    LF("      elseif %s==3 then %s[%s].v=(%s~=0);if %s~=0 then %s=%s+1 end",
-       eState, eRegs, eA, eB, eC, ePc, ePc)
-    -- LOADNIL
-    LF("      elseif %s==4 then for %s=%s,%s+%s do %s[%s].v=nil end",
-       eState, eI, eA, eA, eB, eRegs, eI)
-    -- GETUPVAL: defensive access – if upvals[B] is nil return nil (don't error)
-    LF("      elseif %s==5 then local _uv=%s[%s];%s[%s].v=_uv and _uv.v or nil",
-       eState, eUpvals, eB, eRegs, eA)
-    -- GETTABUP
-    LF("      elseif %s==6 then %s[%s].v=%s[%s].v[%s(%s)]",
-       eState, eRegs, eA, eUpvals, eB, eRk, eC)
-    -- GETTABLE
-    LF("      elseif %s==7 then %s[%s].v=%s[%s].v[%s(%s)]",
-       eState, eRegs, eA, eRegs, eB, eRk, eC)
-    -- SETTABUP
-    LF("      elseif %s==8 then %s[%s].v[%s(%s)]=%s(%s)",
-       eState, eUpvals, eA, eRk, eB, eRk, eC)
-    -- SETUPVAL
-    LF("      elseif %s==9 then %s[%s].v=%s[%s].v",    eState, eUpvals, eB, eRegs, eA)
-    -- SETTABLE
-    LF("      elseif %s==10 then %s[%s].v[%s(%s)]=%s(%s)",
-       eState, eRegs, eA, eRk, eB, eRk, eC)
-    -- NEWTABLE
-    LF("      elseif %s==11 then %s[%s].v={}",          eState, eRegs, eA)
-    -- SELF
-    LF("      elseif %s==12 then %s[%s+1].v=%s[%s].v;%s[%s].v=%s[%s].v[%s(%s)]",
-       eState, eRegs, eA, eRegs, eB, eRegs, eA, eRegs, eB, eRk, eC)
-    -- ADD SUB MUL MOD POW DIV IDIV
-    LF("      elseif %s==13 then %s[%s].v=%s(%s)+%s(%s)", eState, eRegs, eA, eRk, eB, eRk, eC)
-    LF("      elseif %s==14 then %s[%s].v=%s(%s)-%s(%s)", eState, eRegs, eA, eRk, eB, eRk, eC)
-    LF("      elseif %s==15 then %s[%s].v=%s(%s)*%s(%s)", eState, eRegs, eA, eRk, eB, eRk, eC)
-    LF("      elseif %s==16 then %s[%s].v=%s(%s)%%%s(%s)", eState, eRegs, eA, eRk, eB, eRk, eC)
-    LF("      elseif %s==17 then %s[%s].v=%s(%s)^%s(%s)",  eState, eRegs, eA, eRk, eB, eRk, eC)
-    LF("      elseif %s==18 then %s[%s].v=%s(%s)/%s(%s)",  eState, eRegs, eA, eRk, eB, eRk, eC)
-    LF("      elseif %s==19 then %s[%s].v=%s(%s)//%s(%s)", eState, eRegs, eA, eRk, eB, eRk, eC)
-    -- BAND BOR BXOR SHL SHR
-    LF("      elseif %s==20 then %s[%s].v=%s(%s)&%s(%s)",  eState, eRegs, eA, eRk, eB, eRk, eC)
-    LF("      elseif %s==21 then %s[%s].v=%s(%s)|%s(%s)",  eState, eRegs, eA, eRk, eB, eRk, eC)
-    LF("      elseif %s==22 then %s[%s].v=%s(%s)~%s(%s)",  eState, eRegs, eA, eRk, eB, eRk, eC)
-    LF("      elseif %s==23 then %s[%s].v=%s(%s)<<%s(%s)", eState, eRegs, eA, eRk, eB, eRk, eC)
-    LF("      end")
-    LF("    elseif %s<47 then", eState)
-    -- SHR UNM BNOT NOT LEN CONCAT
-    LF("      if %s==24 then %s[%s].v=%s(%s)>>%s(%s)", eState, eRegs, eA, eRk, eB, eRk, eC)
-    LF("      elseif %s==25 then %s[%s].v=-%s[%s].v",  eState, eRegs, eA, eRegs, eB)
-    LF("      elseif %s==26 then %s[%s].v=~%s[%s].v",  eState, eRegs, eA, eRegs, eB)
-    LF("      elseif %s==27 then %s[%s].v=not %s[%s].v",eState, eRegs, eA, eRegs, eB)
-    LF("      elseif %s==28 then %s[%s].v=#%s[%s].v",  eState, eRegs, eA, eRegs, eB)
-    -- CONCAT
-    LF("      elseif %s==29 then", eState)
-    LF("        local %s={}", eT)
-    LF("        for %s=%s,%s do %s[#%s+1]=tostring(%s[%s].v) end", eI, eB, eC, eT, eT, eRegs, eI)
-    LF("        %s[%s].v=table.concat(%s)", eRegs, eA, eT)
-    -- JMP
-    LF("      elseif %s==30 then %s=%s+%s", eState, ePc, ePc, eSBx)
-    -- EQ LT LE TEST TESTSET
-    LF("      elseif %s==31 then if(%s(%s)==%s(%s))~=(%s~=0) then %s=%s+1 end",
-       eState, eRk, eB, eRk, eC, eA, ePc, ePc)
-    LF("      elseif %s==32 then if(%s(%s)<%s(%s))~=(%s~=0) then %s=%s+1 end",
-       eState, eRk, eB, eRk, eC, eA, ePc, ePc)
-    LF("      elseif %s==33 then if(%s(%s)<=%s(%s))~=(%s~=0) then %s=%s+1 end",
-       eState, eRk, eB, eRk, eC, eA, ePc, ePc)
-    LF("      elseif %s==34 then if(not not %s[%s].v)~=(%s~=0) then %s=%s+1 end",
-       eState, eRegs, eA, eC, ePc, ePc)
-    LF("      elseif %s==35 then if(not not %s[%s].v)==(%s~=0) then %s[%s].v=%s[%s].v else %s=%s+1 end",
-       eState, eRegs, eB, eC, eRegs, eA, eRegs, eB, ePc, ePc)
-    -- CALL
-    LF("      elseif %s==36 then", eState)
-    LF("        local %s=%s[%s].v", eFn, eRegs, eA)
-    LF("        local %s={}", eCallArgs)
-    LF("        local %s=%s==0 and %s-%s or %s-1", eNargs, eB, eTop, eA, eB)
-    LF("        for %s=1,%s do %s[%s]=%s[%s+%s].v end", eI, eNargs, eCallArgs, eI, eRegs, eA, eI)
-    LF("        local %s=table.pack(%s(table.unpack(%s,1,%s)))", eResults, eFn, eCallArgs, eNargs)
-    LF("        if %s==0 then", eC)
-    LF("          for %s=0,%s.n-1 do if not %s[%s+%s] then %s[%s+%s]={} end;%s[%s+%s].v=%s[%s+1] end",
-       eI, eResults, eRegs, eA, eI, eRegs, eA, eI, eRegs, eA, eI, eResults, eI)
-    LF("          %s=%s+%s.n-1", eTop, eA, eResults)
-    LF("        else")
-    LF("          for %s=0,%s-2 do if not %s[%s+%s] then %s[%s+%s]={} end;%s[%s+%s].v=%s[%s+1] end",
-       eI, eC, eRegs, eA, eI, eRegs, eA, eI, eRegs, eA, eI, eResults, eI)
-    LF("        end")
-    -- TAILCALL
-    LF("      elseif %s==37 then", eState)
-    LF("        local %s=%s[%s].v", eFn, eRegs, eA)
-    LF("        local %s={}", eCallArgs)
-    LF("        local %s=%s==0 and %s-%s or %s-1", eNargs, eB, eTop, eA, eB)
-    LF("        for %s=1,%s do %s[%s]=%s[%s+%s].v end", eI, eNargs, eCallArgs, eI, eRegs, eA, eI)
-    LF("        return %s(table.unpack(%s,1,%s))", eFn, eCallArgs, eNargs)
-    -- RETURN
-    LF("      elseif %s==38 then", eState)
-    LF("        if %s==1 then return end", eB)
-    LF("        local %s={}", eRet)
-    LF("        local %s=%s==0 and %s or %s+%s-2", eNelem, eB, eTop, eA, eB)
-    LF("        for %s=%s,%s do %s[#%s+1]=%s[%s].v end", eI, eA, eNelem, eRet, eRet, eRegs, eI)
-    LF("        return table.unpack(%s)", eRet)
-    -- FORLOOP
-    LF("      elseif %s==39 then", eState)
-    LF("        %s[%s].v=%s[%s].v+%s[%s+2].v", eRegs, eA, eRegs, eA, eRegs, eA)
-    LF("        local %s=%s[%s].v", eIdx,  eRegs, eA)
-    LF("        local %s=%s[%s+1].v", eLim, eRegs, eA)
-    LF("        local %s=%s[%s+2].v", eStep,eRegs, eA)
-    LF("        if(%s>0 and %s<=%s) or (%s<0 and %s>=%s) then", eStep, eIdx, eLim, eStep, eIdx, eLim)
-    LF("          %s=%s+%s;%s[%s+3].v=%s", ePc, ePc, eSBx, eRegs, eA, eIdx)
-    LF("        end")
-    -- FORPREP
-    LF("      elseif %s==40 then", eState)
-    LF("        %s[%s].v=%s[%s].v-%s[%s+2].v;%s=%s+%s", eRegs, eA, eRegs, eA, eRegs, eA, ePc, ePc, eSBx)
-    -- TFORCALL
-    LF("      elseif %s==41 then", eState)
-    LF("        local %s=table.pack(%s[%s].v(%s[%s+1].v,%s[%s+2].v))",
-       eResults, eRegs, eA, eRegs, eA, eRegs, eA)
-    LF("        for %s=1,%s do if not %s[%s+2+%s] then %s[%s+2+%s]={} end;%s[%s+2+%s].v=%s[%s] end",
-       eI, eC, eRegs, eA, eI, eRegs, eA, eI, eRegs, eA, eI, eResults, eI)
-    -- TFORLOOP
-    LF("      elseif %s==42 then", eState)
-    LF("        if %s[%s+1].v~=nil then %s[%s].v=%s[%s+1].v;%s=%s+%s end",
-       eRegs, eA, eRegs, eA, eRegs, eA, ePc, ePc, eSBx)
-    -- SETLIST
-    LF("      elseif %s==43 then", eState)
-    LF("        local %s", eOffset)
-    LF("        if %s==0 then local ni=%s[%s];%s=%s+1;%s=(ni>>6)*50 else %s=(%s-1)*50 end",
-       eC, eCode, ePc, ePc, ePc, eOffset, eOffset, eC)
-    LF("        local %s=%s==0 and %s-%s or %s", eNelem, eB, eTop, eA, eB)
-    LF("        for %s=1,%s do %s[%s].v[%s+%s]=%s[%s+%s].v end",
-       eI, eNelem, eRegs, eA, eOffset, eI, eRegs, eA, eI)
-    -- CLOSURE: build suvs defensively (nil upvals become empty boxes)
-    LF("      elseif %s==44 then", eState)
-    LF("        local %s=%s[%s]", eSub, eProtos, eBx)
-    LF("        local %s={}", eSuvs)
-    LF("        for %s=0,%s.sizeupvalues-1 do", eI, eSub)
-    LF("          local %s=%s.upvals[%s]", eUv, eSub, eI)
-    LF("          if %s.instack==1 then %s[%s]=%s[%s.idx]", eUv, eSuvs, eI, eRegs, eUv)
-    LF("          else local _u=%s[%s.idx];%s[%s]=_u or {} end", eUpvals, eUv, eSuvs, eI)
-    LF("        end")
-    LF("        local cap_%s,%s_sv=%s,%s", eI, eI, eSuvs, eBx)
-    LF("        %s[%s].v=function(...) return %s(%s[%s_sv],cap_%s,...) end",
-       eRegs, eA, vExec, eProtos, eI, eI)
-    -- VARARG
-    LF("      elseif %s==45 then", eState)
-    LF("        if %s==0 then", eB)
-    LF("          for %s=0,#%s-1 do if not %s[%s+%s] then %s[%s+%s]={} end;%s[%s+%s].v=%s[%s+1] end",
-       eI, eVararg, eRegs, eA, eI, eRegs, eA, eI, eRegs, eA, eI, eVararg, eI)
-    LF("          %s=%s+#%s-1", eTop, eA, eVararg)
-    LF("        else")
-    LF("          for %s=0,%s-2 do if not %s[%s+%s] then %s[%s+%s]={} end;%s[%s+%s].v=%s[%s+1] end",
-       eI, eB, eRegs, eA, eI, eRegs, eA, eI, eRegs, eA, eI, eVararg, eI)
-    LF("        end")
-    -- EXTRAARG – handled inline by LOADKX/SETLIST
-    LF("      end")
+    -- ── Opcode dispatch table: one closure per opcode, indexed by real opcode ──
+    LF("  local %s={}", vDispatch)
+    -- Junk between table creation and first handler
+    src[#src+1] = junk_block("  ", math.random(1, 2))
+
+    -- [0] MOVE
+    LF("  %s[0]=function(%s,%s,%s,%s,%s) %s[%s].v=%s[%s].v end",
+       vDispatch, eA,eB,eC,eBx,eSBx, eRegs,eA, eRegs,eB)
+    -- [1] LOADK
+    LF("  %s[1]=function(%s,%s,%s,%s,%s) %s[%s].v=%s[%s] end",
+       vDispatch, eA,eB,eC,eBx,eSBx, eRegs,eA, eKst,eBx)
+    -- [2] LOADKX  (next instruction is EXTRAARG carrying the index)
+    LF("  %s[2]=function(%s,%s,%s,%s,%s)", vDispatch, eA,eB,eC,eBx,eSBx)
+    LF("    local _ni=%s[%s];%s=%s+1;%s[%s].v=%s[_ni>>6]", eCode,ePc,ePc,ePc, eRegs,eA,eKst)
+    LF("  end")
+    -- [3] LOADBOOL
+    LF("  %s[3]=function(%s,%s,%s,%s,%s) %s[%s].v=(%s~=0);if %s~=0 then %s=%s+1 end end",
+       vDispatch, eA,eB,eC,eBx,eSBx, eRegs,eA,eB, eC,ePc,ePc)
+    -- [4] LOADNIL
+    LF("  %s[4]=function(%s,%s,%s,%s,%s) for _i=%s,%s+%s do %s[_i].v=nil end end",
+       vDispatch, eA,eB,eC,eBx,eSBx, eA,eA,eB, eRegs)
+    src[#src+1] = junk_block("  ", 1)   -- junk between handler groups
+    -- [5] GETUPVAL (defensive: nil upval box → nil)
+    LF("  %s[5]=function(%s,%s,%s,%s,%s) local _u=%s[%s];%s[%s].v=_u and _u.v or nil end",
+       vDispatch, eA,eB,eC,eBx,eSBx, eUpvals,eB, eRegs,eA)
+    -- [6] GETTABUP
+    LF("  %s[6]=function(%s,%s,%s,%s,%s) %s[%s].v=%s[%s].v[%s(%s)] end",
+       vDispatch, eA,eB,eC,eBx,eSBx, eRegs,eA, eUpvals,eB, eRk,eC)
+    -- [7] GETTABLE
+    LF("  %s[7]=function(%s,%s,%s,%s,%s) %s[%s].v=%s[%s].v[%s(%s)] end",
+       vDispatch, eA,eB,eC,eBx,eSBx, eRegs,eA, eRegs,eB, eRk,eC)
+    -- [8] SETTABUP
+    LF("  %s[8]=function(%s,%s,%s,%s,%s) %s[%s].v[%s(%s)]=%s(%s) end",
+       vDispatch, eA,eB,eC,eBx,eSBx, eUpvals,eA, eRk,eB, eRk,eC)
+    -- [9] SETUPVAL
+    LF("  %s[9]=function(%s,%s,%s,%s,%s) %s[%s].v=%s[%s].v end",
+       vDispatch, eA,eB,eC,eBx,eSBx, eUpvals,eB, eRegs,eA)
+    -- [10] SETTABLE
+    LF("  %s[10]=function(%s,%s,%s,%s,%s) %s[%s].v[%s(%s)]=%s(%s) end",
+       vDispatch, eA,eB,eC,eBx,eSBx, eRegs,eA, eRk,eB, eRk,eC)
+    src[#src+1] = junk_block("  ", 1)
+    -- [11] NEWTABLE
+    LF("  %s[11]=function(%s,%s,%s,%s,%s) %s[%s].v={} end",
+       vDispatch, eA,eB,eC,eBx,eSBx, eRegs,eA)
+    -- [12] SELF
+    LF("  %s[12]=function(%s,%s,%s,%s,%s) %s[%s+1].v=%s[%s].v;%s[%s].v=%s[%s].v[%s(%s)] end",
+       vDispatch, eA,eB,eC,eBx,eSBx, eRegs,eA, eRegs,eB, eRegs,eA, eRegs,eB, eRk,eC)
+    -- [13..19] Arithmetic: ADD SUB MUL MOD POW DIV IDIV
+    LF("  %s[13]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)+%s(%s) end", vDispatch,eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
+    LF("  %s[14]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)-%s(%s) end", vDispatch,eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
+    LF("  %s[15]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)*%s(%s) end", vDispatch,eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
+    LF("  %s[16]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)%%%s(%s) end",vDispatch,eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
+    LF("  %s[17]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)^%s(%s) end", vDispatch,eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
+    LF("  %s[18]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)/%s(%s) end", vDispatch,eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
+    LF("  %s[19]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)//%s(%s) end",vDispatch,eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
+    src[#src+1] = junk_block("  ", 1)
+    -- [20..24] Bitwise: BAND BOR BXOR SHL SHR
+    LF("  %s[20]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)&%s(%s) end",  vDispatch,eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
+    LF("  %s[21]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)|%s(%s) end",  vDispatch,eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
+    LF("  %s[22]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)~%s(%s) end",  vDispatch,eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
+    LF("  %s[23]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)<<%s(%s) end", vDispatch,eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
+    LF("  %s[24]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)>>%s(%s) end", vDispatch,eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
+    -- [25..28] Unary: UNM BNOT NOT LEN
+    LF("  %s[25]=function(%s,%s,%s,%s,%s) %s[%s].v=-%s[%s].v end",     vDispatch,eA,eB,eC,eBx,eSBx, eRegs,eA,eRegs,eB)
+    LF("  %s[26]=function(%s,%s,%s,%s,%s) %s[%s].v=~%s[%s].v end",     vDispatch,eA,eB,eC,eBx,eSBx, eRegs,eA,eRegs,eB)
+    LF("  %s[27]=function(%s,%s,%s,%s,%s) %s[%s].v=not %s[%s].v end",  vDispatch,eA,eB,eC,eBx,eSBx, eRegs,eA,eRegs,eB)
+    LF("  %s[28]=function(%s,%s,%s,%s,%s) %s[%s].v=#%s[%s].v end",     vDispatch,eA,eB,eC,eBx,eSBx, eRegs,eA,eRegs,eB)
+    src[#src+1] = junk_block("  ", 1)
+    -- [29] CONCAT
+    LF("  %s[29]=function(%s,%s,%s,%s,%s)", vDispatch, eA,eB,eC,eBx,eSBx)
+    LF("    local _t={}")
+    LF("    for _i=%s,%s do _t[#_t+1]=tostring(%s[_i].v) end", eB,eC,eRegs)
+    LF("    %s[%s].v=table.concat(_t)", eRegs,eA)
+    LF("  end")
+    -- [30] JMP  (modifies pc via upvalue – Lua closure upvalue sharing)
+    LF("  %s[30]=function(%s,%s,%s,%s,%s) %s=%s+%s end",
+       vDispatch, eA,eB,eC,eBx,eSBx, ePc,ePc,eSBx)
+    -- [31..33] Comparisons: EQ LT LE
+    LF("  %s[31]=function(%s,%s,%s,%s,%s) if(%s(%s)==%s(%s))~=(%s~=0) then %s=%s+1 end end",
+       vDispatch, eA,eB,eC,eBx,eSBx, eRk,eB,eRk,eC,eA,ePc,ePc)
+    LF("  %s[32]=function(%s,%s,%s,%s,%s) if(%s(%s)<%s(%s))~=(%s~=0) then %s=%s+1 end end",
+       vDispatch, eA,eB,eC,eBx,eSBx, eRk,eB,eRk,eC,eA,ePc,ePc)
+    LF("  %s[33]=function(%s,%s,%s,%s,%s) if(%s(%s)<=%s(%s))~=(%s~=0) then %s=%s+1 end end",
+       vDispatch, eA,eB,eC,eBx,eSBx, eRk,eB,eRk,eC,eA,ePc,ePc)
+    -- [34] TEST
+    LF("  %s[34]=function(%s,%s,%s,%s,%s) if(not not %s[%s].v)~=(%s~=0) then %s=%s+1 end end",
+       vDispatch, eA,eB,eC,eBx,eSBx, eRegs,eA,eC,ePc,ePc)
+    -- [35] TESTSET
+    LF("  %s[35]=function(%s,%s,%s,%s,%s)", vDispatch, eA,eB,eC,eBx,eSBx)
+    LF("    if(not not %s[%s].v)==(%s~=0) then %s[%s].v=%s[%s].v else %s=%s+1 end",
+       eRegs,eB,eC, eRegs,eA,eRegs,eB, ePc,ePc)
+    LF("  end")
+    src[#src+1] = junk_block("  ", 1)
+    -- [36] CALL
+    LF("  %s[36]=function(%s,%s,%s,%s,%s)", vDispatch, eA,eB,eC,eBx,eSBx)
+    LF("    local %s=%s[%s].v", eFn,eRegs,eA)
+    LF("    local %s={}", eCallArgs)
+    LF("    local %s=%s==0 and %s-%s or %s-1", eNargs,eB,eTop,eA,eB)
+    LF("    for _i=1,%s do %s[_i]=%s[%s+_i].v end", eNargs,eCallArgs,eRegs,eA)
+    LF("    local %s=table.pack(%s(table.unpack(%s,1,%s)))", eResults,eFn,eCallArgs,eNargs)
+    LF("    if %s==0 then", eC)
+    LF("      for _i=0,%s.n-1 do if not %s[%s+_i] then %s[%s+_i]={} end;%s[%s+_i].v=%s[_i+1] end",
+       eResults,eRegs,eA,eRegs,eA,eRegs,eA,eResults)
+    LF("      %s=%s+%s.n-1", eTop,eA,eResults)
+    LF("    else")
+    LF("      for _i=0,%s-2 do if not %s[%s+_i] then %s[%s+_i]={} end;%s[%s+_i].v=%s[_i+1] end",
+       eC,eRegs,eA,eRegs,eA,eRegs,eA,eResults)
     LF("    end")
     LF("  end")
+    -- [37] TAILCALL (simulated as call + done; avoids TCO loss of semantics)
+    LF("  %s[37]=function(%s,%s,%s,%s,%s)", vDispatch, eA,eB,eC,eBx,eSBx)
+    LF("    local %s=%s[%s].v", eFn,eRegs,eA)
+    LF("    local %s={}", eCallArgs)
+    LF("    local %s=%s==0 and %s-%s or %s-1", eNargs,eB,eTop,eA,eB)
+    LF("    for _i=1,%s do %s[_i]=%s[%s+_i].v end", eNargs,eCallArgs,eRegs,eA)
+    LF("    local %s=table.pack(%s(table.unpack(%s,1,%s)))", eResults,eFn,eCallArgs,eNargs)
+    LF("    %s=true;%s=%s.n", eDone,eRetN,eResults)
+    LF("    for _i=1,%s do %s[_i]=%s[_i] end", eRetN,eRetVals,eResults)
+    LF("  end")
+    -- [38] RETURN
+    LF("  %s[38]=function(%s,%s,%s,%s,%s)", vDispatch, eA,eB,eC,eBx,eSBx)
+    LF("    %s=true", eDone)
+    LF("    if %s==1 then %s=0;return end", eB,eRetN)
+    LF("    local %s=%s==0 and %s or %s+%s-2", eNelem,eB,eTop,eA,eB)
+    LF("    %s=0", eRetN)
+    LF("    for _i=%s,%s do %s=%s+1;%s[%s]=%s[_i].v end", eA,eNelem,eRetN,eRetN,eRetVals,eRetN,eRegs)
+    LF("  end")
+    src[#src+1] = junk_block("  ", 1)
+    -- [39] FORLOOP
+    LF("  %s[39]=function(%s,%s,%s,%s,%s)", vDispatch, eA,eB,eC,eBx,eSBx)
+    LF("    %s[%s].v=%s[%s].v+%s[%s+2].v", eRegs,eA,eRegs,eA,eRegs,eA)
+    LF("    local %s=%s[%s].v;local %s=%s[%s+1].v;local %s=%s[%s+2].v",
+       eIdx,eRegs,eA, eLim,eRegs,eA, eStep,eRegs,eA)
+    LF("    if(%s>0 and %s<=%s)or(%s<0 and %s>=%s) then %s=%s+%s;%s[%s+3].v=%s end",
+       eStep,eIdx,eLim,eStep,eIdx,eLim, ePc,ePc,eSBx, eRegs,eA,eIdx)
+    LF("  end")
+    -- [40] FORPREP
+    LF("  %s[40]=function(%s,%s,%s,%s,%s) %s[%s].v=%s[%s].v-%s[%s+2].v;%s=%s+%s end",
+       vDispatch, eA,eB,eC,eBx,eSBx, eRegs,eA,eRegs,eA,eRegs,eA, ePc,ePc,eSBx)
+    -- [41] TFORCALL
+    LF("  %s[41]=function(%s,%s,%s,%s,%s)", vDispatch, eA,eB,eC,eBx,eSBx)
+    LF("    local %s=table.pack(%s[%s].v(%s[%s+1].v,%s[%s+2].v))",
+       eResults,eRegs,eA,eRegs,eA,eRegs,eA)
+    LF("    for _i=1,%s do if not %s[%s+2+_i] then %s[%s+2+_i]={} end;%s[%s+2+_i].v=%s[_i] end",
+       eC,eRegs,eA,eRegs,eA,eRegs,eA,eResults)
+    LF("  end")
+    -- [42] TFORLOOP
+    LF("  %s[42]=function(%s,%s,%s,%s,%s)",vDispatch,eA,eB,eC,eBx,eSBx)
+    LF("    if %s[%s+1].v~=nil then %s[%s].v=%s[%s+1].v;%s=%s+%s end",
+       eRegs,eA, eRegs,eA,eRegs,eA, ePc,ePc,eSBx)
+    LF("  end")
+    src[#src+1] = junk_block("  ", 1)
+    -- [43] SETLIST
+    LF("  %s[43]=function(%s,%s,%s,%s,%s)", vDispatch, eA,eB,eC,eBx,eSBx)
+    LF("    local _off")
+    LF("    if %s==0 then local _ni=%s[%s];%s=%s+1;_off=(_ni>>6)*50 else _off=(%s-1)*50 end",
+       eC,eCode,ePc,ePc,ePc,eC)
+    LF("    local %s=%s==0 and %s-%s or %s", eNelem,eB,eTop,eA,eB)
+    LF("    for _i=1,%s do %s[%s].v[_off+_i]=%s[%s+_i].v end", eNelem,eRegs,eA,eRegs,eA)
+    LF("  end")
+    -- [44] CLOSURE: captures suvs+proto-index via local aliases (safe even
+    --              when eI is reused as a loop counter elsewhere)
+    LF("  %s[44]=function(%s,%s,%s,%s,%s)", vDispatch, eA,eB,eC,eBx,eSBx)
+    LF("    local %s=%s[%s]", eSub,eProtos,eBx)
+    LF("    local %s={}", eSuvs)
+    LF("    for _i=0,%s.sizeupvalues-1 do", eSub)
+    LF("      local %s=%s.upvals[_i]", eUv,eSub)
+    LF("      if %s.instack==1 then %s[_i]=%s[%s.idx]", eUv,eSuvs,eRegs,eUv)
+    LF("      else local _u=%s[%s.idx];%s[_i]=_u or {} end", eUpvals,eUv,eSuvs)
+    LF("    end")
+    LF("    local _csuvs,_cbx=%s,%s", eSuvs,eBx)
+    LF("    %s[%s].v=function(...) return %s(%s[_cbx],_csuvs,...) end", eRegs,eA,vExec,eProtos)
+    LF("  end")
+    -- [45] VARARG
+    LF("  %s[45]=function(%s,%s,%s,%s,%s)", vDispatch, eA,eB,eC,eBx,eSBx)
+    LF("    if %s==0 then", eB)
+    LF("      for _i=0,#%s-1 do if not %s[%s+_i] then %s[%s+_i]={} end;%s[%s+_i].v=%s[_i+1] end",
+       eVararg,eRegs,eA,eRegs,eA,eRegs,eA,eVararg)
+    LF("      %s=%s+#%s-1", eTop,eA,eVararg)
+    LF("    else")
+    LF("      for _i=0,%s-2 do if not %s[%s+_i] then %s[%s+_i]={} end;%s[%s+_i].v=%s[_i+1] end",
+       eB,eRegs,eA,eRegs,eA,eRegs,eA,eVararg)
+    LF("    end")
+    LF("  end")
+    -- [46] EXTRAARG  (consumed by LOADKX/SETLIST; treated as no-op if reached alone)
+    LF("  %s[46]=function(%s,%s,%s,%s,%s) end", vDispatch, eA,eB,eC,eBx,eSBx)
+
+    src[#src+1] = junk_block("  ", math.random(1, 2))
+
+    -- ── Main fetch-decode-dispatch loop ──────────────────────────────────────
+    LF("  while not %s do", eDone)
+    LF("    local %s=%s[%s]", eInst,eCode,ePc)
+    LF("    %s=%s+1", ePc,ePc)
+    LF("    local %s=%s[%s&0x3F]", eOp,vRevmap,eInst)
+    LF("    local %s=(%s>>6)&0xFF",   eA,  eInst)
+    LF("    local %s=(%s>>23)&0x1FF", eB,  eInst)
+    LF("    local %s=(%s>>14)&0x1FF", eC,  eInst)
+    LF("    local %s=(%s>>14)&0x3FFFF",eBx,eInst)
+    LF("    local %s=%s-131071",       eSBx,eBx)
+    LF("    %s[%s](%s,%s,%s,%s,%s)", vDispatch,eOp,eA,eB,eC,eBx,eSBx)
+    LF("  end")
+    LF("  return table.unpack(%s,1,%s)", eRetVals,eRetN)
     LF("end")  -- end execute function
+    -- Junk block after execute function definition
+    src[#src+1] = junk_block("", math.random(2, 4))
 
     -- ── Main: anti-tamper, decrypt, deserialize, run ──────────
     -- The payload table (superflow_bytecode) was already emitted at the top of the file.
@@ -654,6 +773,12 @@ function VmGen.generate(proto, revmap, key, utils)
 
     -- Anti-tamper 8: math library sanity
     LF("do if not math.maxinteger or math.maxinteger<=0 or math.mininteger>=0 then error('Catify: environment tampered (math)',0) end end")
+
+    -- Anti-tamper 9: table library sanity (insert/remove must be callable)
+    LF("do if type(table.insert)~='function' or type(table.remove)~='function' or type(table.concat)~='function' then error('Catify: environment tampered (tablelib)',0) end end")
+
+    -- Anti-tamper 10: coroutine library basic check
+    LF("do if type(coroutine)~='table' or type(coroutine.wrap)~='function' then error('Catify: environment tampered (coroutine)',0) end end")
 
     -- Decrypt and deserialize
     LF("%s=%s(%s,%s)", vBlob, vDecrypt, vBlob, vKey)

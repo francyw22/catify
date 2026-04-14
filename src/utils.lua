@@ -218,7 +218,22 @@ function Utils.obfuscate_int_deep(n)
     return string.format("((%d~%d)+%d+%d-%d-%d)", a, b, p, q, p, q)
 end
 
--- ─── CRC32 (IEEE 802.3) ───────────────────────────────────────────────────────
+--- Return a triple-layer XOR expression (with additive noise) that evaluates to integer n.
+--- Harder to constant-fold than obfuscate_int_deep because of the extra XOR layer.
+---@param n integer
+---@return string  Lua expression string
+function Utils.obfuscate_int_triple(n)
+    local a = math.random(0, 0x1FFFFFFF)
+    local b = a ~ n
+    local c = math.random(0, 0x1FFFFFFF)
+    local d = c ~ b
+    local p = math.random(1, 0x7FFF)
+    local q = math.random(1, 0x7FFF)
+    -- (a ~ (c ~ d)) ~ b  ==  a ~ b  ==  n, wrapped in +p-p noise
+    return string.format("((%d~(%d~%d))~%d+%d-%d)", a, c, d, b, p, p)
+end
+
+
 
 local _CRC32_TABLE = (function()
     local t = {}
