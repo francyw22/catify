@@ -285,6 +285,15 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local eDone     = vn()   -- execution-done flag
     local eRetVals  = vn()   -- return-values accumulator
     local eRetN     = vn()   -- number of return values
+    -- Key/nonce split chunk names (multi-layer key protection)
+    local vKp1 = vn()   -- key bytes 1-8,  pre-XOR'd with chunk mask 1
+    local vKp2 = vn()   -- key bytes 9-16, pre-XOR'd with chunk mask 2
+    local vKp3 = vn()   -- key bytes 17-24,pre-XOR'd with chunk mask 3
+    local vKp4 = vn()   -- key bytes 25-32,pre-XOR'd with chunk mask 4
+    local vNp1 = vn()   -- nonce bytes 1-4, pre-XOR'd with nonce mask 1
+    local vNp2 = vn()   -- nonce bytes 5-8, pre-XOR'd with nonce mask 2
+    local vDk1 = vn()   -- decoy key fragment 1 (never used for real decryption)
+    local vDk2 = vn()   -- decoy key fragment 2 (never used for real decryption)
 
     -- ── 3. Compute SHA-256 of the encrypted blob for anti-tamper ─────────────
     local blob_sha = utils.sha256(blob)
@@ -478,7 +487,16 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("local function %s(_k)", aesKe)
     LF("  local _w={}")
     LF("  for _i=0,7 do _w[_i]=(_k:byte(_i*4+1)<<24)|(_k:byte(_i*4+2)<<16)|(_k:byte(_i*4+3)<<8)|_k:byte(_i*4+4) end")
-    LF("  local _rc={[1]=0x01000000,[2]=0x02000000,[3]=0x04000000,[4]=0x08000000,[5]=0x10000000,[6]=0x20000000,[7]=0x40000000}")
+    -- Mask AES round constants (Rcon) so they don't fingerprint AES key schedule.
+    do
+        local rc_raw  = {0x01000000,0x02000000,0x04000000,0x08000000,0x10000000,0x20000000,0x40000000}
+        local rc_mask = math.random(1, 0x3FFFFFFF)
+        local rc_strs = {}
+        for i = 1, 7 do rc_strs[i] = string.format("[%d]=%d", i, (rc_raw[i] ~ rc_mask) & 0xFFFFFFFF) end
+        LF("  local _rc={%s}", table.concat(rc_strs, ","))
+        LF("  do local _rm=%s;for _i=1,7 do _rc[_i]=(_rc[_i]~_rm)&0xFFFFFFFF end end",
+           utils.obfuscate_int_deep(rc_mask))
+    end
     LF("  for _i=8,59 do")
     LF("    local _t=_w[_i-1]")
     LF("    if _i%%8==0 then")
@@ -874,14 +892,63 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- ── Main: anti-tamper, decrypt, deserialize, run ──────────
     -- The payload table (superflow_bytecode) was already emitted at the top of the file.
 
-    -- AES key + nonce: emit each byte as a XOR-obfuscated integer expression fed to
-    -- string.char() so the raw byte values are never visible as \NNN literals.
-    local key_chars = {}
-    for i = 1, #key do key_chars[i] = utils.obfuscate_int_deep(key:byte(i)) end
-    LF("local %s=string.char(%s)", vKey, table.concat(key_chars, ","))
-    local nonce_chars = {}
-    for i = 1, #nonce do nonce_chars[i] = utils.obfuscate_int_deep(nonce:byte(i)) end
-    LF("local %s=string.char(%s)", vNonce, table.concat(nonce_chars, ","))
+    -- AES key split into 4 × 8-byte chunks with per-chunk runtime XOR masks.
+    -- Each chunk's bytes are pre-XOR'd with a session mask at codegen time so
+    -- evaluating the string.char() expressions only yields the masked (wrong) bytes.
+    -- An assembly block right before decryption unmasks + concatenates them.
+    -- Per-chunk masks (codegen time, stored for use in the assembly block below):
+    local km = {math.random(1,255), math.random(1,255), math.random(1,255), math.random(1,255)}
+    local nm = {math.random(1,255), math.random(1,255)}
+    -- Forward-declare vKey and vNonce; will be assigned just before decryption.
+    LF("local %s", vKey)
+    LF("local %s", vNonce)
+    -- Key chunk 1 (bytes 1-8, each pre-XOR'd with km[1])
+    do
+        local t = {}
+        for bi = 1, 8 do t[bi] = utils.obfuscate_int_deep(key:byte(bi) ~ km[1]) end
+        LF("local %s=string.char(%s)", vKp1, table.concat(t, ","))
+    end
+    -- Key chunk 2 (bytes 9-16, each pre-XOR'd with km[2])
+    do
+        local t = {}
+        for bi = 1, 8 do t[bi] = utils.obfuscate_int_deep(key:byte(8+bi) ~ km[2]) end
+        LF("local %s=string.char(%s)", vKp2, table.concat(t, ","))
+    end
+    -- Key chunk 3 (bytes 17-24, each pre-XOR'd with km[3])
+    do
+        local t = {}
+        for bi = 1, 8 do t[bi] = utils.obfuscate_int_deep(key:byte(16+bi) ~ km[3]) end
+        LF("local %s=string.char(%s)", vKp3, table.concat(t, ","))
+    end
+    -- Key chunk 4 (bytes 25-32, each pre-XOR'd with km[4])
+    do
+        local t = {}
+        for bi = 1, 8 do t[bi] = utils.obfuscate_int_deep(key:byte(24+bi) ~ km[4]) end
+        LF("local %s=string.char(%s)", vKp4, table.concat(t, ","))
+    end
+    -- Nonce chunk 1 (bytes 1-4, each pre-XOR'd with nm[1])
+    do
+        local t = {}
+        for bi = 1, 4 do t[bi] = utils.obfuscate_int_deep(nonce:byte(bi) ~ nm[1]) end
+        LF("local %s=string.char(%s)", vNp1, table.concat(t, ","))
+    end
+    -- Nonce chunk 2 (bytes 5-8, each pre-XOR'd with nm[2])
+    do
+        local t = {}
+        for bi = 1, 4 do t[bi] = utils.obfuscate_int_deep(nonce:byte(4+bi) ~ nm[2]) end
+        LF("local %s=string.char(%s)", vNp2, table.concat(t, ","))
+    end
+    -- Decoy key fragments (random bytes, never used for actual decryption)
+    do
+        local t = {}
+        for bi = 1, 8 do t[bi] = utils.obfuscate_int_deep(math.random(0, 255)) end
+        LF("local %s=string.char(%s)", vDk1, table.concat(t, ","))
+    end
+    do
+        local t = {}
+        for bi = 1, 8 do t[bi] = utils.obfuscate_int_deep(math.random(0, 255)) end
+        LF("local %s=string.char(%s)", vDk2, table.concat(t, ","))
+    end
 
     -- Anti-tamper 1: SHA-256 integrity check of the encrypted blob
     -- Emit inline SHA-256 function
@@ -896,7 +963,16 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("  local _k={%s}", table.concat(sha_k_strs, ","))
     LF("  do local _m=%s;for _i=1,64 do _k[_i]=(_k[_i]~_m)&0xFFFFFFFF end end",
        utils.obfuscate_int_deep(sha_k_mask))
-    LF("  local %s={0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19}", shaH)
+    -- Mask SHA-256 initial hash values (IV) so they don't fingerprint SHA-256 init.
+    do
+        local sha_h_raw  = {0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19}
+        local sha_h_mask = math.random(1, 0x3FFFFFFF)
+        local sha_h_strs = {}
+        for i = 1, 8 do sha_h_strs[i] = tostring((sha_h_raw[i] ~ sha_h_mask) & 0xFFFFFFFF) end
+        LF("  local %s={%s}", shaH, table.concat(sha_h_strs, ","))
+        LF("  do local _hm=%s;for _i=1,8 do %s[_i]=(%s[_i]~_hm)&0xFFFFFFFF end end",
+           utils.obfuscate_int_deep(sha_h_mask), shaH, shaH)
+    end
     LF("  local _len=#_s;local _bl=_len*8")
     LF("  local _pd=_s..'\\x80'")
     LF("  while #_pd%%64~=56 do _pd=_pd..'\\x00' end")
@@ -1035,8 +1111,31 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
        vWm, table.concat(wm_parts, ","))
 
     -- Decrypt and deserialize
+    -- Assemble the real key from 4 pre-masked chunks (runtime unmask).
+    -- Assemble the real nonce from 2 pre-masked chunks.
+    -- Both forward-declared earlier; wiped immediately after use.
+    LF("do")
+    LF("  local _kt={}")
+    LF("  local _km1=%s;for _j=1,8 do _kt[_j]=string.char(%s:byte(_j)~_km1)end",
+       utils.obfuscate_int_deep(km[1]), vKp1)
+    LF("  local _km2=%s;for _j=1,8 do _kt[8+_j]=string.char(%s:byte(_j)~_km2)end",
+       utils.obfuscate_int_deep(km[2]), vKp2)
+    LF("  local _km3=%s;for _j=1,8 do _kt[16+_j]=string.char(%s:byte(_j)~_km3)end",
+       utils.obfuscate_int_deep(km[3]), vKp3)
+    LF("  local _km4=%s;for _j=1,8 do _kt[24+_j]=string.char(%s:byte(_j)~_km4)end",
+       utils.obfuscate_int_deep(km[4]), vKp4)
+    LF("  %s=table.concat(_kt)", vKey)
+    LF("  %s=nil;%s=nil;%s=nil;%s=nil;_kt=nil", vKp1, vKp2, vKp3, vKp4)
+    LF("  local _nt={}")
+    LF("  local _nm1=%s;for _j=1,4 do _nt[_j]=string.char(%s:byte(_j)~_nm1)end",
+       utils.obfuscate_int_deep(nm[1]), vNp1)
+    LF("  local _nm2=%s;for _j=1,4 do _nt[4+_j]=string.char(%s:byte(_j)~_nm2)end",
+       utils.obfuscate_int_deep(nm[2]), vNp2)
+    LF("  %s=table.concat(_nt)", vNonce)
+    LF("  %s=nil;%s=nil;_nt=nil", vNp1, vNp2)
+    LF("end")
     LF("%s=%s(%s,%s,%s)", vBlob, vDecrypt, vBlob, vKey, vNonce)
-    LF("%s=nil;%s=nil;%s=nil", vKey, vNonce, vDecrypt)   -- wipe key, nonce, decryptor
+    LF("%s=nil;%s=nil;%s=nil;%s=nil;%s=nil", vKey, vNonce, vDecrypt, vDk1, vDk2)   -- wipe key, nonce, decryptor, decoys
     LF("%s=1", dPos)
     LF("%s=%s", dData, vBlob)
     LF("local %s=%s()", vProto, vLoadProto)
