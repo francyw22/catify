@@ -44,7 +44,9 @@ local function ser_f64(v)  return string.pack("<d", v)  end
 local function ser_i64(v)  return string.pack("<i8", v) end
 local function ser_str(s)  return ser_i32(#s) .. s      end
 
-local function serialize_proto(proto)
+-- sxor: optional byte (0-255) XOR-applied to every string constant before
+-- the outer RC4 pass, providing a second independent encryption layer.
+local function serialize_proto(proto, sxor)
     local buf = {}
     local function w(s) buf[#buf+1] = s end
 
@@ -77,7 +79,16 @@ local function serialize_proto(proto)
             end
         elseif ct == "string" then
             w(ser_u8(5))
-            w(ser_str(c))
+            if sxor and sxor ~= 0 then
+                -- XOR each byte with the per-session key before storing.
+                local enc = {}
+                for i = 1, #c do
+                    enc[i] = string.char(c:byte(i) ~ sxor)
+                end
+                w(ser_str(table.concat(enc)))
+            else
+                w(ser_str(c))
+            end
         else
             error("Unknown constant type: " .. ct)
         end
@@ -93,7 +104,7 @@ local function serialize_proto(proto)
     -- Nested prototypes (recursive)
     w(ser_i32(proto.sizep))
     for i = 0, proto.sizep - 1 do
-        w(serialize_proto(proto.p[i]))
+        w(serialize_proto(proto.p[i], sxor))
     end
 
     return table.concat(buf)
@@ -145,7 +156,8 @@ end
 ---@return string  Lua source
 function VmGen.generate(proto, revmap, key, utils)
     -- ── 1. Serialize + encrypt the custom bytecode ───────────────────────────
-    local raw  = serialize_proto(proto)
+    local sxor_byte = math.random(1, 255)     -- per-session string XOR key
+    local raw  = serialize_proto(proto, sxor_byte)
     local blob = utils.rc4(raw, key)
 
     -- ── 2. Generate random identifiers for all locals ───────────────────────
@@ -230,6 +242,9 @@ function VmGen.generate(proto, revmap, key, utils)
     local atCrc     = vn()   -- expected CRC variable
     local atCalc    = vn()   -- computed CRC variable
     local atDbg     = vn()   -- debug reference
+    local vStrXor   = vn()   -- string-constant XOR key (second encryption layer)
+    local atVer     = vn()   -- Lua version check scratch
+    local atRaw     = vn()   -- raw* functions check scratch
 
     -- ── 3. Compute CRC32 of the encrypted blob for anti-tamper ──────────────
     local blob_crc = utils.crc32(blob)
@@ -241,15 +256,39 @@ function VmGen.generate(proto, revmap, key, utils)
     end
     local revmap_lit = "{" .. table.concat(revmap_parts, ",") .. "}"
 
-    -- ── 4. Junk-code snippets (dead branches, always-false conditions) ────────
+    -- ── 4. Junk-code snippets (opaque predicates, dead branches) ─────────────
     local junk_seed = math.random(10000, 99999)
+    -- Three forms of always-false opaque predicates:
+    --  form 1: x XOR x == 0, never > 0
+    --  form 2: n // n == 1, never < 1
+    --  form 3: (a+b)*c - (a+b)*c == 0, never > 1
+    local junk_forms = {
+        function(indent)
+            local a = math.random(1, 0x7FFF)
+            local b = math.random(1, 0xFF)
+            return string.format(
+                "%sdo local %s=%d*%d;local %s=%s~%s;if %s>0 then %s=%s+%d end end\n",
+                indent, jA, a, b, jB, jA, jA, jB, jA, jA, math.random(1, 0xFF))
+        end,
+        function(indent)
+            local a = math.random(2, 0x3FFF)
+            local c = math.random(1, 9)
+            return string.format(
+                "%sdo local %s=%d+%d;local %s=%s//%s;if %s<%d then %s=%s*%d end end\n",
+                indent, jA, a, c, jB, jA, jA, jB, 1, jA, jA, math.random(2, 9))
+        end,
+        function(indent)
+            local a = math.random(1, 0x1FFF)
+            local b = math.random(1, 0x1FFF)
+            local c = math.random(1, 7)
+            local prod = (a + b) * c
+            return string.format(
+                "%sdo local %s=(%d+%d)*%d;local %s=%s-%d;if %s>1 then %s=%s^2 end end\n",
+                indent, jA, a, b, c, jB, jA, prod, jB, jA, jA)
+        end,
+    }
     local function junk_stmt(indent)
-        -- A bogus computation that is never reachable or has no side-effects
-        local a = math.random(1, 100)
-        local b = math.random(200, 300)
-        return string.format(
-            "%slocal %s=%d;if %s>%d then %s=%s*%d end\n",
-            indent, jA, a, jA, b, jA, jA, math.random(2,9))
+        return junk_forms[math.random(1, #junk_forms)](indent)
     end
 
     -- ── 5. Assemble source ────────────────────────────────────────────────────
@@ -305,6 +344,16 @@ function VmGen.generate(proto, revmap, key, utils)
         "local function %s() local n=%s();local s=%s:sub(%s,%s+n-1);%s=%s+n;return s end\n",
         dRstr, dRi32, dData, dPos, dPos, dPos, dPos)
 
+    -- Emit the string-constant XOR key as an obfuscated math expression so it
+    -- is not visible as a plain integer literal in the output.
+    do
+        local sx_a = math.random(0, 255)
+        local sx_b = sx_a ~ sxor_byte  -- XOR split: sx_a ~ sx_b == sxor_byte
+        local sx_p = math.random(1, 0xFFFF)
+        local sx_q = math.random(1, 0xFFFF)
+        LF("local %s=((%d~%d)+%d+%d-%d-%d)", vStrXor, sx_a, sx_b, sx_p, sx_q, sx_p, sx_q)
+    end
+
     -- Recursive prototype loader (declared forward)
     local vLoadProto = vn()
     LF("local %s", vLoadProto)
@@ -327,7 +376,7 @@ function VmGen.generate(proto, revmap, key, utils)
     LF("    elseif t==2 then k[i]=true")
     LF("    elseif t==3 then k[i]=%s()", dRi64)
     LF("    elseif t==4 then k[i]=%s()", dRf64)
-    LF("    elseif t==5 then k[i]=%s()", dRstr)
+    LF("    elseif t==5 then local _sx=%s();local _sd={};for _si=1,#_sx do _sd[_si]=string.char(_sx:byte(_si)~%s)end;k[i]=table.concat(_sd)", dRstr, vStrXor)
     LF("    end")
     LF("  end")
     -- Upvalues
@@ -564,8 +613,12 @@ function VmGen.generate(proto, revmap, key, utils)
     LF("  for _i=1,#s do _r=_t[(_r~s:byte(_i))&0xFF]~(_r>>8) end")
     LF("  return _r~0xFFFFFFFF")
     LF("end")
-    -- Compute expected CRC and verify
-    LF("local %s=%s", atCrc, tostring(blob_crc))
+    -- Emit expected CRC as an obfuscated XOR-split expression.
+    local crc_a = math.random(0, 0x3FFFFFFF)
+    local crc_b = crc_a ~ blob_crc
+    local crc_p = math.random(1, 0xFFFF)
+    local crc_q = math.random(1, 0xFFFF)
+    LF("local %s=((%d~%d)+%d+%d-%d-%d)", atCrc, crc_a, crc_b, crc_p, crc_q, crc_p, crc_q)
     LF("local %s=table.concat(%s)", vBlob, PAYLOAD_TABLE_NAME)
     LF("%s=nil", PAYLOAD_TABLE_NAME)   -- wipe payload table after concat
     LF("local %s=_crc32_(%s)", atCalc, vBlob)
@@ -584,6 +637,23 @@ function VmGen.generate(proto, revmap, key, utils)
     LF("    if _v==nil then error('Catify: environment tampered ('.._k..')',0) end")
     LF("  end")
     LF("end")
+
+    -- Anti-tamper 4: Lua version must be 5.3 or 5.4
+    LF("do local %s=_VERSION;if not %s or (not %s:find('5%%.3') and not %s:find('5%%.4')) then error('Catify: unsupported Lua version',0) end end",
+       atVer, atVer, atVer, atVer)
+
+    -- Anti-tamper 5: rawequal / rawget / rawset must be genuine functions
+    LF("do local %s={rawequal,rawget,rawset,rawlen,select,ipairs,pairs,next,unpack or table.unpack};for _,_f in ipairs(%s) do if type(_f)~='function' then error('Catify: environment tampered (raw)',0) end end end",
+       atRaw, atRaw)
+
+    -- Anti-tamper 6: type() sanity (standard type names must not be overridden)
+    LF("do if type(nil)~='nil' or type(0)~='number' or type('')~='string' or type({})~='table' or type(type)~='function' then error('Catify: environment tampered (type)',0) end end")
+
+    -- Anti-tamper 7: string standard library sanity
+    LF("do if string.byte('A')~=65 or string.char(65)~='A' or string.len('ab')~=2 then error('Catify: environment tampered (strlib)',0) end end")
+
+    -- Anti-tamper 8: math library sanity
+    LF("do if not math.maxinteger or math.maxinteger<=0 or math.mininteger>=0 then error('Catify: environment tampered (math)',0) end end")
 
     -- Decrypt and deserialize
     LF("%s=%s(%s,%s)", vBlob, vDecrypt, vBlob, vKey)

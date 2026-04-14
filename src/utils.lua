@@ -201,6 +201,23 @@ function Utils.obfuscate_int(n)
     end
 end
 
+--- Return a complex multi-layer Lua expression that evaluates to integer n.
+--- Uses XOR-split encoding (a ~ (a ~ n) == n) with additive noise so the
+--- value is not trivially visible to a static decompiler.
+---@param n integer  (any Lua integer, including large unsigned 32-bit values)
+---@return string    Lua expression string
+function Utils.obfuscate_int_deep(n)
+    -- XOR split: let a = random, b = a XOR n → a XOR b == n
+    local a = math.random(0, 0x3FFFFFFF)
+    local b = a ~ n
+    -- Additive noise: p + q − q cancels, but written as separate literals so
+    -- a decompiler cannot trivially constant-fold the full expression.
+    local p = math.random(1, 0xFFFF)
+    local q = math.random(1, 0xFFFF)
+    -- Final: (a ~ b) + (p + q) - p - q  ==  n
+    return string.format("((%d~%d)+%d+%d-%d-%d)", a, b, p, q, p, q)
+end
+
 -- ─── CRC32 (IEEE 802.3) ───────────────────────────────────────────────────────
 
 local _CRC32_TABLE = (function()
