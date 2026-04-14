@@ -37,21 +37,31 @@ lua output.lua
 
 ## Discord Bot
 
-The `bot/` directory contains a **Discordia** (Luvit) Discord bot that exposes Catify as a
-slash command.
+The `bot/` directory contains a **discord.js** (Node.js) Discord bot that exposes Catify as a
+chat command.
+
+### Requirements
+
+- Node.js ≥ 18
+- `lua` 5.3+ in your `PATH`
 
 ### Setup
 
-1. Install **Luvit** from https://luvit.io/  
-2. Install Discordia: `lit install SinisterRectus/discordia`  
-3. Copy the example config and add your token:
+1. Install Node.js dependencies:
    ```bash
-   cp bot/config.example.lua bot/config.lua
-   # Edit bot/config.lua and set `token = "YOUR_BOT_TOKEN"`
+   cd bot
+   npm install
    ```
+2. Copy the example env file and add your token:
+   ```bash
+   cp bot/.env.example bot/.env
+   # Edit bot/.env and set CATIFY_TOKEN=YOUR_BOT_TOKEN
+   ```
+3. Enable the **Message Content** privileged intent for your bot at
+   https://discord.com/developers/applications
 4. Start the bot:
    ```bash
-   luvit bot/discord_bot.lua
+   npm start
    ```
 
 ### Commands
@@ -62,12 +72,15 @@ slash command.
 | `!catify print("hi")` | Obfuscate inline Lua code |
 | `!catify` + `.lua` file | Upload a file; bot returns the protected version |
 
-### Environment variables (alternative to config.lua)
+### Environment variables
 
 | Variable | Default | Description |
 |---|---|---|
-| `CATIFY_TOKEN` | — | Discord bot token (required if no config.lua) |
+| `CATIFY_TOKEN` | — | Discord bot token (required) |
 | `CATIFY_PREFIX` | `!` | Command prefix |
+| `CATIFY_PASSES` | `1` | Obfuscation passes (1 or 2) |
+| `CATIFY_MAX_INLINE` | `32768` | Max inline code size in bytes |
+| `CATIFY_MAX_FILE` | `524288` | Max attachment size in bytes |
 
 ---
 
@@ -99,8 +112,8 @@ src/
   vm_gen.lua        – VM source code generator
   utils.lua         – RC4, CRC-32, random name generator
 bot/
-  discord_bot.lua   – Discordia/Luvit Discord bot
-  catify_api.lua    – In-process API wrapper around the pipeline
-  config.example.lua– Example configuration (copy to config.lua)
-.gitignore          – Excludes bot/config.lua (secrets)
+  discord_bot.js    – discord.js (Node.js) Discord bot
+  package.json      – Node.js dependencies
+  .env.example      – Example environment config (copy to .env)
+.gitignore          – Excludes bot/.env (secrets)
 ```
