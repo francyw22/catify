@@ -71,8 +71,15 @@ local function serialize_proto(proto, sxor)
             w(ser_u8(c and 2 or 1))
         elseif ct == "number" then
             if math.type(c) == "integer" then
-                w(ser_u8(3))
-                w(ser_i64(c))
+                local ok, packed = pcall(string.pack, "<i8", c)
+                if ok then
+                    w(ser_u8(3))
+                    w(packed)
+                else
+                    -- Fallback: store as float (loses precision for |c| > 2^53)
+                    w(ser_u8(4))
+                    w(ser_f64(c * 1.0))
+                end
             else
                 w(ser_u8(4))
                 w(ser_f64(c))
@@ -362,8 +369,8 @@ function VmGen.generate(proto, revmap, key, utils)
     local function L(s) src[#src+1] = s .. "\n" end
     local function LF(fmt, ...) L(string.format(fmt, ...)) end
 
-    -- ── Header comment matching reference obfuscator style ───────────────────
-    L("--[[\n\tCatify — Lua Script Protector\n\thttps://github.com/francyw22/catempire\n]]")
+    -- ── Header comment (minimal, for compact output) ─────────────────────────
+    -- (intentionally omitted for compact output)
 
     -- ── Chunked payload table at the top (reference style: global assignment) ─
     -- This is emitted first so it matches the reference's `superflow_bytecode={...}`
@@ -416,15 +423,23 @@ function VmGen.generate(proto, revmap, key, utils)
     LF("local %s", dData)
     LF("local function %s() local v=%s:byte(%s);%s=%s+1;return v end", dRb, dData, dPos, dPos, dPos)
     LF("local function %s() local v,p=string.unpack('<i4',%s,%s);%s=p;return v end", dRi32, dData, dPos, dPos)
-    LF("local function %s() local v,p=string.unpack('<i8',%s,%s);%s=p;return v end", dRi64, dData, dPos, dPos)
+    -- dRi64: detect at runtime whether '<i8' unpack works (64-bit Lua / Roblox),
+    -- and fall back to double arithmetic for 32-bit platforms.
+    -- The probe value (2^31 as LE bytes) fails on 32-bit Lua but succeeds elsewhere.
+    LF("local _i8ok=(function() local ok=pcall(string.unpack,'<i8','\\0\\0\\0\\128\\0\\0\\0\\0',1);return ok end)()")
+    LF("local function %s()", dRi64)
+    LF("  if _i8ok then local _v,_p=string.unpack('<i8',%s,%s);%s=_p;return _v end", dData, dPos, dPos)
+    LF("  local _lo,_p1=string.unpack('<I4',%s,%s);%s=_p1", dData, dPos, dPos)
+    LF("  local _hi,_p2=string.unpack('<I4',%s,%s);%s=_p2", dData, dPos, dPos)
+    LF("  if _hi==0 then return _lo end")
+    LF("  local _v=_lo+_hi*(2^32)")
+    LF("  if _hi>=(2^31) then _v=_v-(2^64) end")
+    LF("  return _v")
+    LF("end")
     LF("local function %s() local v,p=string.unpack('<d',%s,%s);%s=p;return v end",  dRf64, dData, dPos, dPos)
-    LF("local function %s() local n=%s();return %s:sub(%s,%s+n-1) end", dRstr, dRi32, dData, dPos, dPos)
-    -- The actual string-read lambda must also advance pos
-    -- Rewrite dRstr properly:
-    -- The sub call above reads without advancing; fix:
-    src[#src] = string.format(
-        "local function %s() local n=%s();local s=%s:sub(%s,%s+n-1);%s=%s+n;return s end\n",
-        dRstr, dRi32, dData, dPos, dPos, dPos, dPos)
+    -- dRstr: emit once (correctly advancing pos)
+    LF("local function %s() local _n,_p=string.unpack('<i4',%s,%s);%s=_p;local _s=%s:sub(%s,%s+_n-1);%s=%s+_n;return _s end",
+       dRstr, dData, dPos, dPos, dData, dPos, dPos, dPos, dPos)
 
     -- Emit the string-constant XOR key as an obfuscated math expression so it
     -- is not visible as a plain integer literal in the output.
@@ -696,16 +711,33 @@ function VmGen.generate(proto, revmap, key, utils)
 
     src[#src+1] = junk_block("  ", math.random(1, 2))
 
+    -- ── Pre-compute obfuscated mask/shift constants (evaluated once) ──────────
+    local _m63   = utils.obfuscate_int_deep(0x3F)
+    local _m255  = utils.obfuscate_int_deep(0xFF)
+    local _m511  = utils.obfuscate_int_deep(0x1FF)
+    local _m18   = utils.obfuscate_int_deep(0x3FFFF)
+    local _bias  = utils.obfuscate_int_deep(131071)
+    local _sh6   = utils.obfuscate_int_deep(6)
+    local _sh14  = utils.obfuscate_int_deep(14)
+    local _sh23  = utils.obfuscate_int_deep(23)
+    -- Emit as locals inside execute (pre-computed, not re-evaluated per instruction)
+    local eMask63  = vn(); local eMask255 = vn(); local eMask511 = vn()
+    local eMask18  = vn(); local eBias    = vn()
+    local eSh6     = vn(); local eSh14   = vn(); local eSh23 = vn()
+    LF("  local %s=%s local %s=%s local %s=%s", eMask63,_m63, eMask255,_m255, eMask511,_m511)
+    LF("  local %s=%s local %s=%s", eMask18,_m18, eBias,_bias)
+    LF("  local %s=%s local %s=%s local %s=%s", eSh6,_sh6, eSh14,_sh14, eSh23,_sh23)
+
     -- ── Main fetch-decode-dispatch loop ──────────────────────────────────────
     LF("  while not %s do", eDone)
     LF("    local %s=%s[%s]", eInst,eCode,ePc)
     LF("    %s=%s+1", ePc,ePc)
-    LF("    local %s=%s[%s&0x3F]", eOp,vRevmap,eInst)
-    LF("    local %s=(%s>>6)&0xFF",   eA,  eInst)
-    LF("    local %s=(%s>>23)&0x1FF", eB,  eInst)
-    LF("    local %s=(%s>>14)&0x1FF", eC,  eInst)
-    LF("    local %s=(%s>>14)&0x3FFFF",eBx,eInst)
-    LF("    local %s=%s-131071",       eSBx,eBx)
+    LF("    local %s=%s[%s&%s]", eOp,vRevmap,eInst,eMask63)
+    LF("    local %s=(%s>>%s)&%s",   eA,  eInst,eSh6, eMask255)
+    LF("    local %s=(%s>>%s)&%s",   eB,  eInst,eSh23,eMask511)
+    LF("    local %s=(%s>>%s)&%s",   eC,  eInst,eSh14,eMask511)
+    LF("    local %s=(%s>>%s)&%s",   eBx, eInst,eSh14,eMask18)
+    LF("    local %s=%s-%s",         eSBx,eBx,eBias)
     LF("    %s[%s](%s,%s,%s,%s,%s)", vDispatch,eOp,eA,eB,eC,eBx,eSBx)
     LF("  end")
     LF("  return table.unpack(%s,1,%s)", eRetVals,eRetN)
@@ -743,10 +775,12 @@ function VmGen.generate(proto, revmap, key, utils)
     LF("local %s=_crc32_(%s)", atCalc, vBlob)
     LF("if %s~=%s then error('Catify: integrity check failed',0) end", atCalc, atCrc)
 
-    -- Anti-tamper 2: debug hook detection
-    LF("local %s=rawget(_ENV,'debug')", atDbg)
-    LF("if %s and type(%s.gethook)=='function' then", atDbg, atDbg)
-    LF("  if %s.gethook()~=nil then error('Catify: debug hook detected',0) end", atDbg)
+    -- Anti-tamper 2: debug hook detection (wrapped in pcall for Roblox compatibility)
+    LF("local %s", atDbg)
+    LF("pcall(function() %s=rawget(_ENV,'debug') end)", atDbg)
+    LF("if %s and type(%s)=='table' and type(%s.gethook)=='function' then", atDbg, atDbg, atDbg)
+    LF("  local _dhok,_dhv=pcall(%s.gethook,%s)", atDbg, atDbg)
+    LF("  if _dhok and _dhv~=nil then error('Catify: debug hook detected',0) end")
     LF("end")
 
     -- Anti-tamper 3: critical global integrity check
@@ -757,9 +791,9 @@ function VmGen.generate(proto, revmap, key, utils)
     LF("  end")
     LF("end")
 
-    -- Anti-tamper 4: Lua version must be 5.3 or 5.4
-    LF("do local %s=_VERSION;if not %s or (not %s:find('5%%.3') and not %s:find('5%%.4')) then error('Catify: unsupported Lua version',0) end end",
-       atVer, atVer, atVer, atVer)
+    -- Anti-tamper 4: Lua version must be 5.3, 5.4, or Roblox Luau
+    LF("do local %s=_VERSION;if not(%s and(%s:find('5%%.3') or %s:find('5%%.4') or %s:find('Luau')))then error('Catify: unsupported Lua version',0) end end",
+       atVer, atVer, atVer, atVer, atVer)
 
     -- Anti-tamper 5: core standard functions must be genuine callable values
     LF("do local %s={rawequal,rawget,rawset,rawlen,select,ipairs,pairs,next,unpack or table.unpack};for _,_f in ipairs(%s) do if type(_f)~='function' then error('Catify: environment tampered (core)',0) end end end",
@@ -771,8 +805,8 @@ function VmGen.generate(proto, revmap, key, utils)
     -- Anti-tamper 7: string standard library sanity
     LF("do if string.byte('A')~=65 or string.char(65)~='A' or string.len('ab')~=2 then error('Catify: environment tampered (strlib)',0) end end")
 
-    -- Anti-tamper 8: math library sanity
-    LF("do if not math.maxinteger or math.maxinteger<=0 or math.mininteger>=0 then error('Catify: environment tampered (math)',0) end end")
+    -- Anti-tamper 8: math library sanity (math.pi is universal; maxinteger absent in Luau)
+    LF("do if type(math.pi)~='number' or math.pi<=3 or math.pi>=4 or type(math.abs)~='function' then error('Catify: environment tampered (math)',0) end end")
 
     -- Anti-tamper 9: table library sanity (insert/remove must be callable)
     LF("do if type(table.insert)~='function' or type(table.remove)~='function' or type(table.concat)~='function' then error('Catify: environment tampered (tablelib)',0) end end")
@@ -793,7 +827,16 @@ function VmGen.generate(proto, revmap, key, utils)
        vExec, vProto, vEnv)
     L("end")
 
-    return table.concat(src)
+    -- ── Compact post-processing: strip indentation and join lines ────────────
+    local full = table.concat(src)
+    local compact_lines = {}
+    for line in full:gmatch("[^\n]+") do
+        local trimmed = line:match("^%s*(.-)%s*$")
+        if trimmed and trimmed ~= "" then
+            compact_lines[#compact_lines + 1] = trimmed
+        end
+    end
+    return table.concat(compact_lines, " ")
 end
 
 return VmGen

@@ -53,9 +53,16 @@ function Reader:read_uint32()
 end
 
 function Reader:read_int64()
-    local v, p = string.unpack("<i8", self.data, self.pos)
-    self.pos = p
-    return v
+    -- Try signed 64-bit first (works on 64-bit Lua 5.3+)
+    local ok, v, p = pcall(string.unpack, "<i8", self.data, self.pos)
+    if ok then self.pos = p; return v end
+    -- Fallback for 32-bit Lua: read as two unsigned 32-bit halves and combine
+    local lo, p2 = string.unpack("<I4", self.data, self.pos)
+    local hi, p3 = string.unpack("<I4", self.data, p2)
+    self.pos = p3
+    local val = lo + hi * 4294967296.0
+    if hi >= 2147483648 then val = val - 18446744073709551616.0 end
+    return val
 end
 
 function Reader:read_double()
