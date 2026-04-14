@@ -512,7 +512,7 @@ function Utils.aes256_ctr(data, key, nonce)
     local pos = 1
     local dlen = #data
     while pos <= dlen do
-        local ctr_block = nonce .. string.pack("<I8", ctr)
+        local ctr_block = nonce .. string.pack("<I4", ctr) .. string.pack("<I4", 0)
         local ks = _aes256_encrypt_block(ctr_block, rk)
         local blen = math.min(16, dlen - pos + 1)
         for i = 1, blen do
