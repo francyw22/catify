@@ -296,6 +296,14 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local vNp2 = vn()   -- nonce bytes 5-8, pre-XOR'd with nonce mask 2
     local vDk1 = vn()   -- decoy key fragment 1 (never used for real decryption)
     local vDk2 = vn()   -- decoy key fragment 2 (never used for real decryption)
+    -- Bitwise compat helpers: use bit32 (Roblox Luau) or native ops loaded via load()
+    -- (native ops in load() strings bypass Luau's parser so older Luau versions work too)
+    local bXor = vn()   -- bitwise XOR  (a ~ b)
+    local bNot = vn()   -- bitwise NOT  (~a)
+    local bAnd = vn()   -- bitwise AND  (a & b)
+    local bOr  = vn()   -- bitwise OR   (a | b)
+    local bShl = vn()   -- left shift   (a << b)
+    local bShr = vn()   -- right shift  (a >> b)
 
     -- ── 3. Compute SHA-256 of the encrypted blob for anti-tamper ─────────────
     local blob_sha = utils.sha256(blob)
@@ -353,8 +361,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
             local a = math.random(1, 0x7FFF)
             local b = math.random(1, 0xFF)
             return string.format(
-                "%sdo local %s=%d*%d;local %s=%s~%s;if %s>0 then %s=%s+%d end end\n",
-                indent, v1, a, b, v2, v1, v1, v2, v1, v1, math.random(1, 0xFF))
+                "%sdo local %s=%d*%d;local %s=%s(%s,%s);if %s>0 then %s=%s+%d end end\n",
+                indent, v1, a, b, v2, bXor, v1, v1, v2, v1, v1, math.random(1, 0xFF))
         end,
         -- form 2: integer division identity
         function(indent)
@@ -401,8 +409,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
             local y = math.random(1, 0xFFFF)
             local z = x ~ y
             return string.format(
-                "%sdo local %s=%d;local %s=%d;local %s=%s~%s;if (%s~%s)>0 then %s=%s|1 end end\n",
-                indent, v1, x, v2, y, v3, v1, v2, v3, v1, v2, v2)
+                "%sdo local %s=%d;local %s=%d;local %s=%s(%s,%s);if %s(%s,%s)>0 then %s=%s(%s,1) end end\n",
+                indent, v1, x, v2, y, v3, bXor, v1, v2, bXor, v3, v1, v2, bOr, v2)
         end,
         -- form 7: math.max identity (always picks first arg)
         function(indent)
@@ -466,6 +474,19 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Wrap all VM internals in a do...end block so locals don't pollute global scope
     L("do")
     L("local _=tostring;local __=type;local ___=pcall;local ____=load")
+    -- Bitwise compat: use bit32 library if available (Roblox Luau), otherwise
+    -- load native Lua 5.3 operators via load() so the Luau parser never sees ~, &, |, <<, >>
+    LF("local %s,%s,%s,%s,%s,%s", bXor,bNot,bAnd,bOr,bShl,bShr)
+    LF("if type(bit32)=='table' then")
+    LF("  %s=bit32.bxor;%s=bit32.bnot;%s=bit32.band;%s=bit32.bor;%s=bit32.lshift;%s=bit32.rshift", bXor,bNot,bAnd,bOr,bShl,bShr)
+    LF("else")
+    LF("  %s=load'return function(a,b)return a~b end'()", bXor)
+    LF("  %s=load'return function(a)return ~a end'()", bNot)
+    LF("  %s=load'return function(a,b)return a&b end'()", bAnd)
+    LF("  %s=load'return function(a,b)return a|b end'()", bOr)
+    LF("  %s=load'return function(a,b)return a<<b end'()", bShl)
+    LF("  %s=load'return function(a,b)return a>>b end'()", bShr)
+    LF("end")
     -- Junk block at top of do-scope (dead computations, not reachable by any real code path)
     src[#src+1] = junk_block("", math.random(2, 4))
     -- ── Emit payload concatenation helper (decoy wrapper using allocated names) ──
@@ -483,12 +504,12 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local sbox_strs = {}
     for i = 1, #sbox_vals do sbox_strs[i] = tostring(sbox_vals[i] ~ sbox_mask) end
     LF("local %s={[0]=%s}", aesSbox, table.concat(sbox_strs, ","))
-    LF("do local _m=%s;for _i=0,255 do %s[_i]=%s[_i]~_m end end",
-       utils.obfuscate_int_deep(sbox_mask), aesSbox, aesSbox)
-    LF("local function %s(_a) return((_a<<1)~(_a>=0x80 and 0x1b or 0))&0xFF end", aesXt)
+    LF("do local _m=%s;for _i=0,255 do %s[_i]=%s(%s[_i],_m) end end",
+       utils.obfuscate_int_deep(sbox_mask), aesSbox, bXor, aesSbox)
+    LF("local function %s(_a) return %s(%s(%s(_a,1),(_a>=0x80 and 0x1b or 0)),0xFF) end", aesXt, bAnd, bXor, bShl)
     LF("local function %s(_k)", aesKe)
     LF("  local _w={}")
-    LF("  for _i=0,7 do _w[_i]=(_k:byte(_i*4+1)<<24)|(_k:byte(_i*4+2)<<16)|(_k:byte(_i*4+3)<<8)|_k:byte(_i*4+4) end")
+    LF("  for _i=0,7 do _w[_i]=%s(%s(%s(%s(_k:byte(_i*4+1),24),%s(_k:byte(_i*4+2),16)),%s(_k:byte(_i*4+3),8)),_k:byte(_i*4+4)) end", bOr,bOr,bOr,bShl,bShl,bShl)
     -- Mask AES round constants (Rcon) so they don't fingerprint AES key schedule.
     do
         local rc_raw  = {0x01000000,0x02000000,0x04000000,0x08000000,0x10000000,0x20000000,0x40000000}
@@ -496,26 +517,26 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         local rc_strs = {}
         for i = 1, 7 do rc_strs[i] = string.format("[%d]=%d", i, (rc_raw[i] ~ rc_mask) & 0xFFFFFFFF) end
         LF("  local _rc={%s}", table.concat(rc_strs, ","))
-        LF("  do local _rm=%s;for _i=1,7 do _rc[_i]=(_rc[_i]~_rm)&0xFFFFFFFF end end",
-           utils.obfuscate_int_deep(rc_mask))
+        LF("  do local _rm=%s;for _i=1,7 do _rc[_i]=%s(%s(_rc[_i],_rm),0xFFFFFFFF) end end",
+           utils.obfuscate_int_deep(rc_mask), bAnd, bXor)
     end
     LF("  for _i=8,59 do")
     LF("    local _t=_w[_i-1]")
     LF("    if _i%%8==0 then")
-    LF("      _t=((_t<<8)|(_t>>24))&0xFFFFFFFF")
-    LF("      _t=(%s[(_t>>24)&0xFF]<<24)|(%s[(_t>>16)&0xFF]<<16)|(%s[(_t>>8)&0xFF]<<8)|%s[_t&0xFF]", aesSbox,aesSbox,aesSbox,aesSbox)
-    LF("      _t=(_t~_rc[_i//8])&0xFFFFFFFF")
+    LF("      _t=%s(%s(%s(_t,8),%s(_t,24)),0xFFFFFFFF)", bAnd,bOr,bShl,bShr)
+    LF("      _t=%s(%s(%s(%s(%s[%s(%s(_t,24),0xFF)],24),%s(%s[%s(%s(_t,16),0xFF)],16)),%s(%s[%s(%s(_t,8),0xFF)],8)),%s[%s(_t,0xFF)])", bOr,bOr,bOr,bShl,aesSbox,bAnd,bShr,bShl,aesSbox,bAnd,bShr,bShl,aesSbox,bAnd,bShr,aesSbox,bAnd)
+    LF("      _t=%s(%s(_t,_rc[_i//8]),0xFFFFFFFF)", bAnd,bXor)
     LF("    elseif _i%%8==4 then")
-    LF("      _t=(%s[(_t>>24)&0xFF]<<24)|(%s[(_t>>16)&0xFF]<<16)|(%s[(_t>>8)&0xFF]<<8)|%s[_t&0xFF]", aesSbox,aesSbox,aesSbox,aesSbox)
+    LF("      _t=%s(%s(%s(%s(%s[%s(%s(_t,24),0xFF)],24),%s(%s[%s(%s(_t,16),0xFF)],16)),%s(%s[%s(%s(_t,8),0xFF)],8)),%s[%s(_t,0xFF)])", bOr,bOr,bOr,bShl,aesSbox,bAnd,bShr,bShl,aesSbox,bAnd,bShr,bShl,aesSbox,bAnd,bShr,aesSbox,bAnd)
     LF("    end")
-    LF("    _w[_i]=(_w[_i-8]~_t)&0xFFFFFFFF")
+    LF("    _w[_i]=%s(%s(_w[_i-8],_t),0xFFFFFFFF)", bAnd,bXor)
     LF("  end")
     LF("  return _w")
     LF("end")
     LF("local function %s(_blk,_rk)", aesEb)
     LF("  local _s={}")
     LF("  for _i=0,15 do _s[_i]=_blk:byte(_i+1) end")
-    LF("  for _c=0,3 do local _w=_rk[_c];_s[_c*4]=_s[_c*4]~((_w>>24)&0xFF);_s[_c*4+1]=_s[_c*4+1]~((_w>>16)&0xFF);_s[_c*4+2]=_s[_c*4+2]~((_w>>8)&0xFF);_s[_c*4+3]=_s[_c*4+3]~(_w&0xFF) end")
+    LF("  for _c=0,3 do local _w=_rk[_c];_s[_c*4]=%s(_s[_c*4],%s(%s(_w,24),0xFF));_s[_c*4+1]=%s(_s[_c*4+1],%s(%s(_w,16),0xFF));_s[_c*4+2]=%s(_s[_c*4+2],%s(%s(_w,8),0xFF));_s[_c*4+3]=%s(_s[_c*4+3],%s(_w,0xFF)) end", bXor,bAnd,bShr,bXor,bAnd,bShr,bXor,bAnd,bShr,bXor,bAnd)
     LF("  for _r=1,13 do")
     LF("    for _i=0,15 do _s[_i]=%s[_s[_i]] end", aesSbox)
     LF("    local _t;_t=_s[1];_s[1]=_s[5];_s[5]=_s[9];_s[9]=_s[13];_s[13]=_t")
@@ -523,18 +544,18 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("    _t=_s[3];_s[3]=_s[15];_s[15]=_s[11];_s[11]=_s[7];_s[7]=_t")
     LF("    for _c=0,3 do")
     LF("      local _a0,_a1,_a2,_a3=_s[_c*4],_s[_c*4+1],_s[_c*4+2],_s[_c*4+3]")
-    LF("      _s[_c*4]=%s(_a0)~%s(_a1)~_a1~_a2~_a3", aesXt, aesXt)
-    LF("      _s[_c*4+1]=_a0~%s(_a1)~%s(_a2)~_a2~_a3", aesXt, aesXt)
-    LF("      _s[_c*4+2]=_a0~_a1~%s(_a2)~%s(_a3)~_a3", aesXt, aesXt)
-    LF("      _s[_c*4+3]=%s(_a0)~_a0~_a1~_a2~%s(_a3)", aesXt, aesXt)
+    LF("      _s[_c*4]=%s(%s(%s(%s(%s(_a0),%s(_a1)),_a1),_a2),_a3)", bXor,bXor,bXor,bXor,aesXt,aesXt)
+    LF("      _s[_c*4+1]=%s(%s(%s(%s(_a0,%s(_a1)),%s(_a2)),_a2),_a3)", bXor,bXor,bXor,bXor,aesXt,aesXt)
+    LF("      _s[_c*4+2]=%s(%s(%s(%s(_a0,_a1),%s(_a2)),%s(_a3)),_a3)", bXor,bXor,bXor,bXor,aesXt,aesXt)
+    LF("      _s[_c*4+3]=%s(%s(%s(%s(%s(_a0),_a0),_a1),_a2),%s(_a3))", bXor,bXor,bXor,bXor,aesXt,aesXt)
     LF("    end")
-    LF("    for _c=0,3 do local _w=_rk[_r*4+_c];_s[_c*4]=_s[_c*4]~((_w>>24)&0xFF);_s[_c*4+1]=_s[_c*4+1]~((_w>>16)&0xFF);_s[_c*4+2]=_s[_c*4+2]~((_w>>8)&0xFF);_s[_c*4+3]=_s[_c*4+3]~(_w&0xFF) end")
+    LF("    for _c=0,3 do local _w=_rk[_r*4+_c];_s[_c*4]=%s(_s[_c*4],%s(%s(_w,24),0xFF));_s[_c*4+1]=%s(_s[_c*4+1],%s(%s(_w,16),0xFF));_s[_c*4+2]=%s(_s[_c*4+2],%s(%s(_w,8),0xFF));_s[_c*4+3]=%s(_s[_c*4+3],%s(_w,0xFF)) end", bXor,bAnd,bShr,bXor,bAnd,bShr,bXor,bAnd,bShr,bXor,bAnd)
     LF("  end")
     LF("  for _i=0,15 do _s[_i]=%s[_s[_i]] end", aesSbox)
     LF("  local _t;_t=_s[1];_s[1]=_s[5];_s[5]=_s[9];_s[9]=_s[13];_s[13]=_t")
     LF("  _t=_s[2];local _t2=_s[6];_s[2]=_s[10];_s[6]=_s[14];_s[10]=_t;_s[14]=_t2")
     LF("  _t=_s[3];_s[3]=_s[15];_s[15]=_s[11];_s[11]=_s[7];_s[7]=_t")
-    LF("  for _c=0,3 do local _w=_rk[56+_c];_s[_c*4]=_s[_c*4]~((_w>>24)&0xFF);_s[_c*4+1]=_s[_c*4+1]~((_w>>16)&0xFF);_s[_c*4+2]=_s[_c*4+2]~((_w>>8)&0xFF);_s[_c*4+3]=_s[_c*4+3]~(_w&0xFF) end")
+    LF("  for _c=0,3 do local _w=_rk[56+_c];_s[_c*4]=%s(_s[_c*4],%s(%s(_w,24),0xFF));_s[_c*4+1]=%s(_s[_c*4+1],%s(%s(_w,16),0xFF));_s[_c*4+2]=%s(_s[_c*4+2],%s(%s(_w,8),0xFF));_s[_c*4+3]=%s(_s[_c*4+3],%s(_w,0xFF)) end", bXor,bAnd,bShr,bXor,bAnd,bShr,bXor,bAnd,bShr,bXor,bAnd)
     LF("  local _o={};for _i=0,15 do _o[_i+1]=string.char(_s[_i]) end;return table.concat(_o)")
     LF("end")
     LF("local function %s(_d,_k,_nn)", vDecrypt)
@@ -544,7 +565,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("    local _cb=_nn..string.pack('<I8',_ctr)")
     LF("    local _ks=%s(_cb,_rk)", aesEb)
     LF("    local _bl=math.min(16,_dl-_pos+1)")
-    LF("    for _i=1,_bl do _out[#_out+1]=string.char(_d:byte(_pos+_i-1)~_ks:byte(_i)) end")
+    LF("    for _i=1,_bl do _out[#_out+1]=string.char(%s(_d:byte(_pos+_i-1),_ks:byte(_i))) end", bXor)
     LF("    _pos=_pos+16;_ctr=_ctr+1")
     LF("  end")
     LF("  return table.concat(_out)")
@@ -558,9 +579,9 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         local db = math.random(1, 0x7FFF)
         local dc = math.random(1, 0xFFFF)
         LF("local function %s(%s)", vDecoy, dkA)
-        LF("  local %s=%d local %s=%d local %s=%s~%d", dkB, da, dkC, db, dkD, dkA, dc)
-        LF("  for %s=1,#%s do %s=%s~string.byte(%s,%s) end", dkB, dkA, dkC, dkC, dkA, dkB)
-        LF("  return %s~%s", dkC, dkD)
+        LF("  local %s=%d local %s=%d local %s=%s(%s,%d)", dkB, da, dkC, db, dkD, bXor, dkA, dc)
+        LF("  for %s=1,#%s do %s=%s(%s,string.byte(%s,%s)) end", dkB, dkA, dkC, bXor, dkC, dkA, dkB)
+        LF("  return %s(%s,%s)", bXor, dkC, dkD)
         LF("end")
     end
 
@@ -595,7 +616,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         local sx_b = sx_a ~ sxor_byte  -- XOR split: sx_a ~ sx_b == sxor_byte
         local sx_p = math.random(1, 0xFFFF)
         local sx_q = math.random(1, 0xFFFF)
-        LF("local %s=((%d~%d)+%d+%d-%d-%d)", vStrXor, sx_a, sx_b, sx_p, sx_q, sx_p, sx_q)
+        LF("local %s=(%s(%d,%d)+%d+%d-%d-%d)", vStrXor, bXor, sx_a, sx_b, sx_p, sx_q, sx_p, sx_q)
     end
 
     -- Recursive prototype loader (declared forward)
@@ -620,7 +641,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("    elseif t==2 then k[i]=true")
     LF("    elseif t==3 then k[i]=%s()", dRi64)
     LF("    elseif t==4 then k[i]=%s()", dRf64)
-    LF("    elseif t==5 then local _sx=%s();local _sd={};for _si=1,#_sx do _sd[_si]=string.char(_sx:byte(_si)~%s)end;k[i]=table.concat(_sd)", dRstr, vStrXor)
+    LF("    elseif t==5 then local _sx=%s();local _sd={};for _si=1,#_sx do _sd[_si]=string.char(%s(_sx:byte(_si),%s))end;k[i]=table.concat(_sd)", dRstr, bXor, vStrXor)
     LF("    end")
     LF("  end")
     -- Upvalues
@@ -681,7 +702,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
        vDispatch, fwdmap[1], eA,eB,eC,eBx,eSBx, eRegs,eA, eKst,eBx)
     -- [2] LOADKX  (next instruction is EXTRAARG carrying the index)
     LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, fwdmap[2], eA,eB,eC,eBx,eSBx)
-    LF("    local _ni=%s[%s];%s=%s+1;%s[%s].v=%s[_ni>>6]", eCode,ePc,ePc,ePc, eRegs,eA,eKst)
+    LF("    local _ni=%s[%s];%s=%s+1;%s[%s].v=%s[%s(_ni,6)]", eCode,ePc,ePc,ePc, eRegs,eA,eKst,bShr)
     LF("  end")
     -- [3] LOADBOOL
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=(%s~=0);if %s~=0 then %s=%s+1 end end",
@@ -725,14 +746,14 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)//%s(%s) end",vDispatch,fwdmap[19],eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
     src[#src+1] = junk_block("  ", 1)
     -- [20..24] Bitwise: BAND BOR BXOR SHL SHR
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)&%s(%s) end",  vDispatch,fwdmap[20],eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)|%s(%s) end",  vDispatch,fwdmap[21],eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)~%s(%s) end",  vDispatch,fwdmap[22],eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)<<%s(%s) end", vDispatch,fwdmap[23],eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)>>%s(%s) end", vDispatch,fwdmap[24],eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s(%s),%s(%s)) end",  vDispatch,fwdmap[20],eA,eB,eC,eBx,eSBx, eRegs,eA,bAnd,eRk,eB,eRk,eC)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s(%s),%s(%s)) end",  vDispatch,fwdmap[21],eA,eB,eC,eBx,eSBx, eRegs,eA,bOr, eRk,eB,eRk,eC)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s(%s),%s(%s)) end",  vDispatch,fwdmap[22],eA,eB,eC,eBx,eSBx, eRegs,eA,bXor,eRk,eB,eRk,eC)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s(%s),%s(%s)) end",  vDispatch,fwdmap[23],eA,eB,eC,eBx,eSBx, eRegs,eA,bShl,eRk,eB,eRk,eC)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s(%s),%s(%s)) end",  vDispatch,fwdmap[24],eA,eB,eC,eBx,eSBx, eRegs,eA,bShr,eRk,eB,eRk,eC)
     -- [25..28] Unary: UNM BNOT NOT LEN
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=-%s[%s].v end",     vDispatch,fwdmap[25],eA,eB,eC,eBx,eSBx, eRegs,eA,eRegs,eB)
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=~%s[%s].v end",     vDispatch,fwdmap[26],eA,eB,eC,eBx,eSBx, eRegs,eA,eRegs,eB)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=-%s[%s].v end",          vDispatch,fwdmap[25],eA,eB,eC,eBx,eSBx, eRegs,eA,eRegs,eB)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s[%s].v) end",       vDispatch,fwdmap[26],eA,eB,eC,eBx,eSBx, eRegs,eA,bNot,eRegs,eB)
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=not %s[%s].v end",  vDispatch,fwdmap[27],eA,eB,eC,eBx,eSBx, eRegs,eA,eRegs,eB)
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=#%s[%s].v end",     vDispatch,fwdmap[28],eA,eB,eC,eBx,eSBx, eRegs,eA,eRegs,eB)
     src[#src+1] = junk_block("  ", 1)
@@ -823,8 +844,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- [43] SETLIST
     LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, fwdmap[43], eA,eB,eC,eBx,eSBx)
     LF("    local _off")
-    LF("    if %s==0 then local _ni=%s[%s];%s=%s+1;_off=(_ni>>6)*50 else _off=(%s-1)*50 end",
-       eC,eCode,ePc,ePc,ePc,eC)
+    LF("    if %s==0 then local _ni=%s[%s];%s=%s+1;_off=%s(_ni,6)*50 else _off=(%s-1)*50 end",
+       eC,eCode,ePc,ePc,ePc,bShr,eC)
     LF("    local %s=%s==0 and %s-%s or %s", eNelem,eB,eTop,eA,eB)
     LF("    for _i=1,%s do %s[%s].v[_off+_i]=%s[%s+_i].v end", eNelem,eRegs,eA,eRegs,eA)
     LF("  end")
@@ -878,11 +899,11 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("  while not %s do", eDone)
     LF("    local %s=%s[%s]", eInst,eCode,ePc)
     LF("    %s=%s+1", ePc,ePc)
-    LF("    local %s=%s&%s", eOp,eInst,eMask63)
-    LF("    local %s=(%s>>%s)&%s",   eA,  eInst,eSh6, eMask255)
-    LF("    local %s=(%s>>%s)&%s",   eB,  eInst,eSh23,eMask511)
-    LF("    local %s=(%s>>%s)&%s",   eC,  eInst,eSh14,eMask511)
-    LF("    local %s=(%s>>%s)&%s",   eBx, eInst,eSh14,eMask18)
+    LF("    local %s=%s(%s,%s)", eOp,bAnd,eInst,eMask63)
+    LF("    local %s=%s(%s(%s,%s),%s)",   eA,  bAnd,bShr,eInst,eSh6, eMask255)
+    LF("    local %s=%s(%s(%s,%s),%s)",   eB,  bAnd,bShr,eInst,eSh23,eMask511)
+    LF("    local %s=%s(%s(%s,%s),%s)",   eC,  bAnd,bShr,eInst,eSh14,eMask511)
+    LF("    local %s=%s(%s(%s,%s),%s)",   eBx, bAnd,bShr,eInst,eSh14,eMask18)
     LF("    local %s=%s-%s",         eSBx,eBx,eBias)
     LF("    %s[%s](%s,%s,%s,%s,%s)", vDispatch,eOp,eA,eB,eC,eBx,eSBx)
     LF("  end")
@@ -961,10 +982,10 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local sha_k_strs = {}
     for i = 1, 64 do sha_k_strs[i] = tostring((sha_k_vals[i] ~ sha_k_mask) & 0xFFFFFFFF) end
     LF("local function %s(_s)", shaFn)
-    LF("  local function _rr(_x,_n) return((_x>>_n)|(_x<<(32-_n)))&0xFFFFFFFF end")
+    LF("  local function _rr(_x,_n) return %s(%s(%s(_x,_n),%s(_x,32-_n)),0xFFFFFFFF) end", bAnd,bOr,bShr,bShl)
     LF("  local _k={%s}", table.concat(sha_k_strs, ","))
-    LF("  do local _m=%s;for _i=1,64 do _k[_i]=(_k[_i]~_m)&0xFFFFFFFF end end",
-       utils.obfuscate_int_deep(sha_k_mask))
+    LF("  do local _m=%s;for _i=1,64 do _k[_i]=%s(%s(_k[_i],_m),0xFFFFFFFF) end end",
+       utils.obfuscate_int_deep(sha_k_mask), bAnd, bXor)
     -- Mask SHA-256 initial hash values (IV) so they don't fingerprint SHA-256 init.
     do
         local sha_h_raw  = {0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19}
@@ -972,35 +993,35 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         local sha_h_strs = {}
         for i = 1, 8 do sha_h_strs[i] = tostring((sha_h_raw[i] ~ sha_h_mask) & 0xFFFFFFFF) end
         LF("  local %s={%s}", shaH, table.concat(sha_h_strs, ","))
-        LF("  do local _hm=%s;for _i=1,8 do %s[_i]=(%s[_i]~_hm)&0xFFFFFFFF end end",
-           utils.obfuscate_int_deep(sha_h_mask), shaH, shaH)
+        LF("  do local _hm=%s;for _i=1,8 do %s[_i]=%s(%s(%s[_i],_hm),0xFFFFFFFF) end end",
+           utils.obfuscate_int_deep(sha_h_mask), shaH, bAnd, bXor, shaH)
     end
     LF("  local _len=#_s;local _bl=_len*8")
     LF("  local _pd=_s..'\\x80'")
     LF("  while #_pd%%64~=56 do _pd=_pd..'\\x00' end")
-    LF("  _pd=_pd..string.pack('>I4',(_bl>>32)&0xFFFFFFFF)..string.pack('>I4',_bl&0xFFFFFFFF)")
+    LF("  _pd=_pd..string.pack('>I4',%s(%s(_bl,32),0xFFFFFFFF))..string.pack('>I4',%s(_bl,0xFFFFFFFF))", bAnd,bShr,bAnd)
     LF("  local %s={}", shaW)
     LF("  for _blk=1,#_pd,64 do")
-    LF("    for _i=1,16 do %s[_i]=string.unpack('>I4',_pd,_blk+(_i-1)*4)&0xFFFFFFFF end", shaW)
+    LF("    for _i=1,16 do %s[_i]=%s(string.unpack('>I4',_pd,_blk+(_i-1)*4),0xFFFFFFFF) end", shaW, bAnd)
     LF("    for _i=17,64 do")
-    LF("      local _s0=(_rr(%s[_i-15],7)~_rr(%s[_i-15],18)~(%s[_i-15]>>3))", shaW,shaW,shaW)
-    LF("      local _s1=(_rr(%s[_i-2],17)~_rr(%s[_i-2],19)~(%s[_i-2]>>10))", shaW,shaW,shaW)
-    LF("      %s[_i]=(%s[_i-16]+_s0+%s[_i-7]+_s1)&0xFFFFFFFF", shaW,shaW,shaW)
+    LF("      local _s0=%s(%s(_rr(%s[_i-15],7),_rr(%s[_i-15],18)),%s(%s[_i-15],3))", bXor,bXor,shaW,shaW,bShr,shaW)
+    LF("      local _s1=%s(%s(_rr(%s[_i-2],17),_rr(%s[_i-2],19)),%s(%s[_i-2],10))", bXor,bXor,shaW,shaW,bShr,shaW)
+    LF("      %s[_i]=%s(%s[_i-16]+_s0+%s[_i-7]+_s1,0xFFFFFFFF)", shaW,bAnd,shaW,shaW)
     LF("    end")
     LF("    local _a,_b,_c,_d,_e,_f,_g,_hv=%s[1],%s[2],%s[3],%s[4],%s[5],%s[6],%s[7],%s[8]", shaH,shaH,shaH,shaH,shaH,shaH,shaH,shaH)
     LF("    for _i=1,64 do")
-    LF("      local _S1=_rr(_e,6)~_rr(_e,11)~_rr(_e,25)")
-    LF("      local _ch=(_e&_f)~((~_e)&_g)")
-    LF("      local _t1=(_hv+_S1+_ch+_k[_i]+%s[_i])&0xFFFFFFFF", shaW)
-    LF("      local _S0=_rr(_a,2)~_rr(_a,13)~_rr(_a,22)")
-    LF("      local _maj=(_a&_b)~(_a&_c)~(_b&_c)")
-    LF("      local _t2=(_S0+_maj)&0xFFFFFFFF")
-    LF("      _hv=_g;_g=_f;_f=_e;_e=(_d+_t1)&0xFFFFFFFF;_d=_c;_c=_b;_b=_a;_a=(_t1+_t2)&0xFFFFFFFF")
+    LF("      local _S1=%s(%s(_rr(_e,6),_rr(_e,11)),_rr(_e,25))", bXor,bXor)
+    LF("      local _ch=%s(%s(_e,_f),%s(%s(_e),_g))", bXor,bAnd,bAnd,bNot)
+    LF("      local _t1=%s(_hv+_S1+_ch+_k[_i]+%s[_i],0xFFFFFFFF)", bAnd, shaW)
+    LF("      local _S0=%s(%s(_rr(_a,2),_rr(_a,13)),_rr(_a,22))", bXor,bXor)
+    LF("      local _maj=%s(%s(%s(_a,_b),%s(_a,_c)),%s(_b,_c))", bXor,bXor,bAnd,bAnd,bAnd)
+    LF("      local _t2=%s(_S0+_maj,0xFFFFFFFF)", bAnd)
+    LF("      _hv=_g;_g=_f;_f=_e;_e=%s(_d+_t1,0xFFFFFFFF);_d=_c;_c=_b;_b=_a;_a=%s(_t1+_t2,0xFFFFFFFF)", bAnd,bAnd)
     LF("    end")
-    LF("    %s[1]=(%s[1]+_a)&0xFFFFFFFF;%s[2]=(%s[2]+_b)&0xFFFFFFFF", shaH,shaH,shaH,shaH)
-    LF("    %s[3]=(%s[3]+_c)&0xFFFFFFFF;%s[4]=(%s[4]+_d)&0xFFFFFFFF", shaH,shaH,shaH,shaH)
-    LF("    %s[5]=(%s[5]+_e)&0xFFFFFFFF;%s[6]=(%s[6]+_f)&0xFFFFFFFF", shaH,shaH,shaH,shaH)
-    LF("    %s[7]=(%s[7]+_g)&0xFFFFFFFF;%s[8]=(%s[8]+_hv)&0xFFFFFFFF", shaH,shaH,shaH,shaH)
+    LF("    %s[1]=%s(%s[1]+_a,0xFFFFFFFF);%s[2]=%s(%s[2]+_b,0xFFFFFFFF)", shaH,bAnd,shaH,shaH,bAnd,shaH)
+    LF("    %s[3]=%s(%s[3]+_c,0xFFFFFFFF);%s[4]=%s(%s[4]+_d,0xFFFFFFFF)", shaH,bAnd,shaH,shaH,bAnd,shaH)
+    LF("    %s[5]=%s(%s[5]+_e,0xFFFFFFFF);%s[6]=%s(%s[6]+_f,0xFFFFFFFF)", shaH,bAnd,shaH,shaH,bAnd,shaH)
+    LF("    %s[7]=%s(%s[7]+_g,0xFFFFFFFF);%s[8]=%s(%s[8]+_hv,0xFFFFFFFF)", shaH,bAnd,shaH,shaH,bAnd,shaH)
     LF("  end")
     LF("  local _out={};for _i=1,8 do _out[_i]=string.pack('>I4',%s[_i]) end;return table.concat(_out)", shaH)
     LF("end")
@@ -1030,15 +1051,15 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         -- The XOR decode is inlined as a function expression; emask is obfuscated.
         local emask_expr = utils.obfuscate_int_deep(emask)
         local eraw = table.concat(echunks, "..")
-        LF("if %s then local _em=%s local _ed={} for _i=1,#_em do _ed[_i]=string.char(_em:byte(_i)~%s) end error(table.concat(_ed),0) end",
-           table.concat(sha_checks, " or "), eraw, emask_expr)
+        LF("if %s then local _em=%s local _ed={} for _i=1,#_em do _ed[_i]=string.char(%s(_em:byte(_i),%s)) end error(table.concat(_ed),0) end",
+           table.concat(sha_checks, " or "), eraw, bXor, emask_expr)
     end
 
     -- ── Anti-tamper block executor: XOR-decode + load() ─────────────────────
     -- Each anti-tamper check is stored as XOR-encoded bytes; this helper
     -- decodes them at runtime and executes them via load() so that none of
     -- the check logic (error strings, API names) appears as readable text.
-    LF("local function %s(_e,_m) local _t={} for _i=1,#_e do _t[_i]=string.char(_e:byte(_i)~_m) end load(table.concat(_t))() end", vAtExec)
+    LF("local function %s(_e,_m) local _t={} for _i=1,#_e do _t[_i]=string.char(%s(_e:byte(_i),_m)) end load(table.concat(_t))() end", vAtExec, bXor)
 
     -- Lua-level helper: XOR-encode `code_str` with a random byte mask and
     -- emit a call to vAtExec(encoded_string, mask) into the generated source.
@@ -1143,21 +1164,21 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Both forward-declared earlier; wiped immediately after use.
     LF("do")
     LF("  local _kt={}")
-    LF("  local _km1=%s;for _j=1,8 do _kt[_j]=string.char(%s:byte(_j)~_km1)end",
-       utils.obfuscate_int_deep(km[1]), vKp1)
-    LF("  local _km2=%s;for _j=1,8 do _kt[8+_j]=string.char(%s:byte(_j)~_km2)end",
-       utils.obfuscate_int_deep(km[2]), vKp2)
-    LF("  local _km3=%s;for _j=1,8 do _kt[16+_j]=string.char(%s:byte(_j)~_km3)end",
-       utils.obfuscate_int_deep(km[3]), vKp3)
-    LF("  local _km4=%s;for _j=1,8 do _kt[24+_j]=string.char(%s:byte(_j)~_km4)end",
-       utils.obfuscate_int_deep(km[4]), vKp4)
+    LF("  local _km1=%s;for _j=1,8 do _kt[_j]=string.char(%s(%s:byte(_j),_km1))end",
+       utils.obfuscate_int_deep(km[1]), bXor, vKp1)
+    LF("  local _km2=%s;for _j=1,8 do _kt[8+_j]=string.char(%s(%s:byte(_j),_km2))end",
+       utils.obfuscate_int_deep(km[2]), bXor, vKp2)
+    LF("  local _km3=%s;for _j=1,8 do _kt[16+_j]=string.char(%s(%s:byte(_j),_km3))end",
+       utils.obfuscate_int_deep(km[3]), bXor, vKp3)
+    LF("  local _km4=%s;for _j=1,8 do _kt[24+_j]=string.char(%s(%s:byte(_j),_km4))end",
+       utils.obfuscate_int_deep(km[4]), bXor, vKp4)
     LF("  %s=table.concat(_kt)", vKey)
     LF("  %s=nil;%s=nil;%s=nil;%s=nil;_kt=nil", vKp1, vKp2, vKp3, vKp4)
     LF("  local _nt={}")
-    LF("  local _nm1=%s;for _j=1,4 do _nt[_j]=string.char(%s:byte(_j)~_nm1)end",
-       utils.obfuscate_int_deep(nm[1]), vNp1)
-    LF("  local _nm2=%s;for _j=1,4 do _nt[4+_j]=string.char(%s:byte(_j)~_nm2)end",
-       utils.obfuscate_int_deep(nm[2]), vNp2)
+    LF("  local _nm1=%s;for _j=1,4 do _nt[_j]=string.char(%s(%s:byte(_j),_nm1))end",
+       utils.obfuscate_int_deep(nm[1]), bXor, vNp1)
+    LF("  local _nm2=%s;for _j=1,4 do _nt[4+_j]=string.char(%s(%s:byte(_j),_nm2))end",
+       utils.obfuscate_int_deep(nm[2]), bXor, vNp2)
     LF("  %s=table.concat(_nt)", vNonce)
     LF("  %s=nil;%s=nil;_nt=nil", vNp1, vNp2)
     LF("end")
