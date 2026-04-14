@@ -257,7 +257,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- anti-tamper names (atPayload is now the fixed string "superflow_bytecode")
     local atCrc     = vn()   -- expected CRC variable
     local atCalc    = vn()   -- computed CRC variable
-    local atDbg     = vn()   -- debug reference
+    local atDbg     = vn()   -- debug reference (kept for SHA block)
     local vStrXor   = vn()   -- string-constant XOR key (second encryption layer)
     local atVer     = vn()   -- Lua version check scratch
     local atRaw     = vn()   -- raw* functions check scratch
@@ -270,6 +270,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local atEnv1    = vn()
     local atEnv2    = vn()
     local atEnv3    = vn()
+    -- Anti-tamper block executor (XOR decoder + load())
+    local vAtExec   = vn()
     -- SHA-256 integrity check variable names
     local atSha     = vn()
     -- Watermark variable name
@@ -1012,95 +1014,120 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         local word_exp = utils.obfuscate_int_deep(blob_sha_words[i])
         sha_checks[i+1] = string.format("(string.unpack('>I4',%s,%d)~=%s)", atSha, i*4+1, word_exp)
     end
-    LF("if %s then error('Catify: integrity check failed',0) end", table.concat(sha_checks, " or "))
+    -- Obfuscate the integrity-check error message so it doesn't appear as plaintext.
+    do
+        local emsg = "Catify: integrity check failed"
+        local emask = math.random(1, 255)
+        local eparts = {}
+        for i = 1, #emsg do eparts[i] = utils.obfuscate_int_deep(emsg:byte(i) ~ emask) end
+        -- Split into chunks of 60 to stay within Lua's register limit.
+        local echunks = {}
+        for i = 1, #eparts, 60 do
+            local ch = {}
+            for j = i, math.min(i + 59, #eparts) do ch[#ch+1] = eparts[j] end
+            echunks[#echunks+1] = string.format("string.char(%s)", table.concat(ch, ","))
+        end
+        -- The XOR decode is inlined as a function expression; emask is obfuscated.
+        local emask_expr = utils.obfuscate_int_deep(emask)
+        local eraw = table.concat(echunks, "..")
+        LF("if %s then local _em=%s local _ed={} for _i=1,#_em do _ed[_i]=string.char(_em:byte(_i)~%s) end error(table.concat(_ed),0) end",
+           table.concat(sha_checks, " or "), eraw, emask_expr)
+    end
 
-    -- Anti-tamper 2: debug hook detection (wrapped in pcall for Roblox compatibility)
-    LF("local %s", atDbg)
-    LF("pcall(function() %s=rawget(_ENV,'debug') end)", atDbg)
-    LF("if %s and type(%s)=='table' and type(%s.gethook)=='function' then", atDbg, atDbg, atDbg)
-    LF("  local _dhok,_dhv=pcall(%s.gethook,%s)", atDbg, atDbg)
-    LF("  if _dhok and _dhv~=nil then error('Catify: debug hook detected',0) end")
-    LF("end")
+    -- ── Anti-tamper block executor: XOR-decode + load() ─────────────────────
+    -- Each anti-tamper check is stored as XOR-encoded bytes; this helper
+    -- decodes them at runtime and executes them via load() so that none of
+    -- the check logic (error strings, API names) appears as readable text.
+    LF("local function %s(_e,_m) local _t={} for _i=1,#_e do _t[_i]=string.char(_e:byte(_i)~_m) end load(table.concat(_t))() end", vAtExec)
+
+    -- Lua-level helper: XOR-encode `code_str` with a random byte mask and
+    -- emit a call to vAtExec(encoded_string, mask) into the generated source.
+    -- Bytes are split into chunks of at most 60 to stay within Lua's register limit.
+    local AT_CHUNK = 60
+    local function at_load(code_str)
+        local mask = math.random(1, 255)
+        local all_parts = {}
+        for i = 1, #code_str do
+            all_parts[i] = utils.obfuscate_int_deep(code_str:byte(i) ~ mask)
+        end
+        local chunks = {}
+        for i = 1, #all_parts, AT_CHUNK do
+            local chunk = {}
+            for j = i, math.min(i + AT_CHUNK - 1, #all_parts) do
+                chunk[#chunk + 1] = all_parts[j]
+            end
+            chunks[#chunks + 1] = string.format("string.char(%s)", table.concat(chunk, ","))
+        end
+        LF("%s(%s,%s)", vAtExec, table.concat(chunks, ".."), utils.obfuscate_int_deep(mask))
+    end
+
+    -- Anti-tamper 2: debug hook detection (self-contained, wrapped in pcall for Roblox)
+    at_load("do local _d;pcall(function() _d=rawget(_ENV,'debug') end);if _d and type(_d)=='table' and type(_d.gethook)=='function' then local _ok,_v=pcall(_d.gethook,_d);if _ok and _v~=nil then error('Catify: debug hook detected',0) end end end")
 
     -- Anti-tamper 3: critical global integrity check
-    LF("do")
-    LF("  local _req={tostring=tostring,type=type,pcall=pcall,load=load,string=string,table=table}")
-    LF("  for _k,_v in pairs(_req) do")
-    LF("    if _v==nil then error('Catify: environment tampered ('.._k..')',0) end")
-    LF("  end")
-    LF("end")
+    at_load("do local _req={tostring=tostring,type=type,pcall=pcall,load=load,string=string,table=table};for _k,_v in pairs(_req) do if _v==nil then error('Catify: environment tampered ('.._k..')',0) end end end")
 
     -- Anti-tamper 4: Lua version must be 5.3, 5.4, or Roblox Luau
-    LF("do local %s=_VERSION;if not(%s and(%s:find('5%%.3') or %s:find('5%%.4') or %s:find('Luau')))then error('Catify: unsupported Lua version',0) end end",
-       atVer, atVer, atVer, atVer, atVer)
+    at_load("do local _v=_VERSION;if not(_v and(_v:find('5%.3') or _v:find('5%.4') or _v:find('Luau')))then error('Catify: unsupported Lua version',0) end end")
 
     -- Anti-tamper 5: core standard functions must be genuine callable values
-    LF("do local %s={rawequal,rawget,rawset,rawlen,select,ipairs,pairs,next,table.unpack or unpack};for _,_f in ipairs(%s) do if type(_f)~='function' then error('Catify: environment tampered (core)',0) end end end",
-       atRaw, atRaw)
+    at_load("do local _t={rawequal,rawget,rawset,rawlen,select,ipairs,pairs,next,table.unpack or unpack};for _,_f in ipairs(_t) do if type(_f)~='function' then error('Catify: environment tampered (core)',0) end end end")
 
     -- Anti-tamper 6: type() sanity (standard type names must not be overridden)
     if math.random(1, 2) == 1 then
-        LF("do if type(nil)~='nil' or type(0)~='number' or type('')~='string' or type({})~='table' or type(type)~='function' then error('Catify: environment tampered (type)',0) end end")
+        at_load("do if type(nil)~='nil' or type(0)~='number' or type('')~='string' or type({})~='table' or type(type)~='function' then error('Catify: environment tampered (type)',0) end end")
     end
 
     -- Anti-tamper 7: string standard library sanity
-    LF("do if string.byte('A')~=65 or string.char(65)~='A' or string.len('ab')~=2 then error('Catify: environment tampered (strlib)',0) end end")
+    at_load("do if string.byte('A')~=65 or string.char(65)~='A' or string.len('ab')~=2 then error('Catify: environment tampered (strlib)',0) end end")
 
     -- Anti-tamper 8: math library sanity (math.pi is universal; maxinteger absent in Luau)
     if math.random(1, 2) == 1 then
-        LF("do if type(math.pi)~='number' or math.pi<=3 or math.pi>=4 or type(math.abs)~='function' then error('Catify: environment tampered (math)',0) end end")
+        at_load("do if type(math.pi)~='number' or math.pi<=3 or math.pi>=4 or type(math.abs)~='function' then error('Catify: environment tampered (math)',0) end end")
     end
 
     -- Anti-tamper 9: table library sanity (insert/remove must be callable)
     if math.random(1, 2) == 1 then
-        LF("do if type(table.insert)~='function' or type(table.remove)~='function' or type(table.concat)~='function' then error('Catify: environment tampered (tablelib)',0) end end")
+        at_load("do if type(table.insert)~='function' or type(table.remove)~='function' or type(table.concat)~='function' then error('Catify: environment tampered (tablelib)',0) end end")
     end
 
     -- Anti-tamper 10: coroutine library basic check
     if math.random(1, 2) == 1 then
-        LF("do if type(coroutine)~='table' or type(coroutine.wrap)~='function' then error('Catify: environment tampered (coroutine)',0) end end")
+        at_load("do if type(coroutine)~='table' or type(coroutine.wrap)~='function' then error('Catify: environment tampered (coroutine)',0) end end")
     end
 
-    -- Anti-keylogger 1: no active debug hook (more thorough check)
-    LF("do local %s", atKl1)
-    LF("  pcall(function() local _d=rawget(_ENV,'debug');if _d and type(_d.gethook)=='function' then %s=_d.gethook() end end)", atKl1)
-    LF("  if %s~=nil then error('Catify: keylogger detected',0) end end", atKl1)
+    -- Anti-keylogger 1: no active debug hook (self-contained, more thorough check)
+    at_load("do local _k;pcall(function() local _d=rawget(_ENV,'debug');if _d and type(_d.gethook)=='function' then _k=_d.gethook() end end);if _k~=nil then error('Catify: keylogger detected',0) end end")
 
     -- Anti-keylogger 2: io library integrity (keyloggers may replace io.read/write)
     -- io is nil in Roblox, so the nil guard makes this a no-op there.
     if math.random(1, 2) == 1 then
-        LF("do local %s=rawget(_ENV,'io');if %s~=nil and(type(%s.read)~='function' or type(%s.write)~='function')then error('Catify: keylogger detected (io)',0)end end",
-           atKl2, atKl2, atKl2, atKl2)
+        at_load("do local _io=rawget(_ENV,'io');if _io~=nil and(type(_io.read)~='function' or type(_io.write)~='function')then error('Catify: keylogger detected (io)',0)end end")
     end
 
     -- Anti-keylogger 3: string metatable not tampered
     if math.random(1, 2) == 1 then
-        LF("do local %s=getmetatable('');if %s~=nil then local _idx=rawget(%s,'__index');if _idx~=nil and type(_idx)~='table' then error('Catify: keylogger detected (strmeta)',0)end end end",
-           atKl3, atKl3, atKl3)
+        at_load("do local _m=getmetatable('');if _m~=nil then local _idx=rawget(_m,'__index');if _idx~=nil and type(_idx)~='table' then error('Catify: keylogger detected (strmeta)',0)end end end")
     end
 
     -- Anti-keylogger 4: pcall/error uncompromised
-    LF("do local %s,_r=pcall(function()return true end);if not %s or _r~=true then error('Catify: keylogger detected (pcall)',0)end end",
-       atKl4, atKl4)
+    at_load("do local _ok,_r=pcall(function()return true end);if not _ok or _r~=true then error('Catify: keylogger detected (pcall)',0)end end")
 
     -- Anti-environmental logger 1: detect _G/_ENV monitoring via metamethod proxy
     if math.random(1, 2) == 1 then
-        LF("do local %s=getmetatable(_G or _ENV);if %s~=nil then if rawget(%s,'__newindex')~=nil or rawget(%s,'__index')~=nil then error('Catify: env logger detected',0)end end end",
-           atEnv1, atEnv1, atEnv1, atEnv1)
+        at_load("do local _m=getmetatable(_G or _ENV);if _m~=nil then if rawget(_m,'__newindex')~=nil or rawget(_m,'__index')~=nil then error('Catify: env logger detected',0)end end end")
     end
 
     -- Anti-environmental logger 2: os library integrity check.
     -- Roblox has os.time and os.clock but NOT os.getenv, so we only check
     -- the two functions that are guaranteed to exist on all supported platforms.
     if math.random(1, 2) == 1 then
-        LF("do local %s=rawget(_ENV,'os');if %s~=nil then if type(%s.time)~='function' or type(%s.clock)~='function' then error('Catify: env tampered (os)',0)end end end",
-           atEnv2, atEnv2, atEnv2, atEnv2)
+        at_load("do local _os=rawget(_ENV,'os');if _os~=nil then if type(_os.time)~='function' or type(_os.clock)~='function' then error('Catify: env tampered (os)',0)end end end")
     end
 
     -- Anti-environmental logger 3: numbers must not have a metatable (some loggers patch this)
     if math.random(1, 2) == 1 then
-        LF("do local %s=getmetatable(0);if %s~=nil then error('Catify: env logger detected (nummt)',0)end end",
-           atEnv3, atEnv3)
+        at_load("do local _m=getmetatable(0);if _m~=nil then error('Catify: env logger detected (nummt)',0)end end")
     end
 
     -- Watermark: obfuscated ASCII cat watermark (sits in memory, never printed)
