@@ -135,7 +135,7 @@ async function obfuscate(source, passes) {
 }
 
 // ── Help text ─────────────────────────────────────────────────────────────────
-const HELP_TEXT = `**Catify — Lua Script Protector**
+const HELP_TEXT = `**Catify obfuscator**
 Prefix: \`${PREFIX}\`
 
 **Commands:**
@@ -148,12 +148,8 @@ Prefix: \`${PREFIX}\`
 
 \`${PREFIX}catify help\`  — Show this message.
 
-**Protections applied:**
-• Custom opcode shuffle (VM-based execution)
-• RC4 encryption of bytecode payload
-• CRC-32 payload integrity check (anti-tamper)
-• Debug-hook detection
-• Critical-global environment verification`;
+**love applied:**
+***too much***`;
 
 // ── Discord client ─────────────────────────────────────────────────────────────
 const client = new Client({
