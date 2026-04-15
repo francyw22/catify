@@ -22,8 +22,8 @@ function Utils.rand_name(min_len, max_len)
     if math.random(1, 3) == 1 then
         buf[1] = "_"
     else
-        local p0 = math.random(1, #ALPHA_LO)
-        buf[1] = ALPHA_LO:sub(p0, p0)
+        local p = math.random(1, #ALPHA_LO)
+        buf[1] = ALPHA_LO:sub(p, p)
     end
     for i = 2, len do
         local p = math.random(1, #ALNUM)
