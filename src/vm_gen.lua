@@ -298,6 +298,12 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     local rdI4le = vn()
     local rdF64le = vn()
     local wrU4be = vn()
+    -- Misc generated-code names (randomized so they don't appear as fixed strings)
+    local vDispatchHandler = vn()  -- local that holds the resolved handler function
+    local vBit32Flag       = vn()  -- boolean: is bit32 library available?
+    local vTostr           = vn()  -- alias for tostring
+    local vTypefn          = vn()  -- alias for type
+    local vPcallfn         = vn()  -- alias for pcall
 
     -- Helper: emit an obfuscated integer expression using the runtime bXor function
     -- so no ~ operator appears in the generated output (Luau/Lua 5.1 compatible).
@@ -320,11 +326,10 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     local virtual_ops = (vm_meta and vm_meta.virtual_ops) or {}
 
     -- ── 4. Junk-code snippets (opaque predicates, dead branches) ─────────────
-    -- Each form picks its own fresh single-letter or short names so that
-    -- consecutive junk blocks never share the same variable identifiers.
-    -- Fifteen human-style single/two-letter names to draw from; forms pick
-    -- 2-3 distinct ones so the pattern varies visually.
-    local _JN = {"x","y","n","v","t","a","b","s","c","r","m","p","q","k","e"}
+    -- Each form picks its own fresh random names so that consecutive junk blocks
+    -- never share the same variable identifiers.
+    -- Generate a per-session pool of 60 unique opaque names for junk locals.
+    local _JN = utils.rand_names(60)
     local function jpick()
         return _JN[math.random(1, #_JN)]
     end
@@ -581,7 +586,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
 
     -- Wrap all VM internals in a do...end block so locals don't pollute global scope
     L("do")
-    L("local _=tostring;local __=type;local ___=pcall")
+    LF("local %s=tostring;local %s=type;local %s=pcall", vTostr, vTypefn, vPcallfn)
     LF("local %s=(type(load)=='function' and load) or (type(loadstring)=='function' and loadstring) or nil", vLoadCompat)
     LF("local %s=(table and table.pack) or function(...) return {n=select('#', ...),...} end", vPack)
     LF("local %s=(table and table.unpack) or unpack", vUnpack)
@@ -589,8 +594,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     -- Bitwise compat: use bit32 library if available (Roblox Luau), otherwise
     -- compile native Lua 5.3 operators via loader so the Luau parser never sees ~, &, |, <<, >>
     LF("local %s,%s,%s,%s,%s,%s", bXor,bNot,bAnd,bOr,bShl,bShr)
-    LF("local bit32Available=type(bit32)=='table' and type(bit32.bxor)=='function' and type(bit32.bnot)=='function' and type(bit32.band)=='function' and type(bit32.bor)=='function'")
-    LF("if bit32Available then")
+    LF("local %s=type(bit32)=='table' and type(bit32.bxor)=='function' and type(bit32.bnot)=='function' and type(bit32.band)=='function' and type(bit32.bor)=='function'", vBit32Flag)
+    LF("if %s then", vBit32Flag)
     LF("  %s=bit32.bxor;%s=bit32.bnot;%s=bit32.band;%s=bit32.bor", bXor,bNot,bAnd,bOr)
     -- bit32.lshift and bit32.rshift may be absent in some Roblox Luau builds.
     -- Fall back to a math-based equivalent using bit32.band (always present).
@@ -1062,8 +1067,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     LF("    local %s=%s(%s(%s,%s),%s)",   eC,  bAnd,bShr,eInst,eSh14,eMask511)
     LF("    local %s=%s(%s(%s,%s),%s)",   eBx, bAnd,bShr,eInst,eSh14,eMask18)
     LF("    local %s=%s-%s",         eSBx,eBx,eBias)
-    LF("    local %s=%s[%s]", "_dh_", vDispatch,eOp)
-    LF("    if %s then %s(%s,%s,%s,%s,%s) else error('Catify: unknown opcode '..tostring(%s),0) end", "_dh_","_dh_",eA,eB,eC,eBx,eSBx,eOp)
+    LF("    local %s=%s[%s]", vDispatchHandler, vDispatch,eOp)
+    LF("    if %s then %s(%s,%s,%s,%s,%s) else error('Catify: unknown opcode '..tostring(%s),0) end", vDispatchHandler,vDispatchHandler,eA,eB,eC,eBx,eSBx,eOp)
     LF("  end")
     LF("  return %s(%s,1,%s)", vUnpack,eRetVals,eRetN)
     LF("end")  -- end execute function
