@@ -411,16 +411,67 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
         -- without those literal strings appearing anywhere in the generated code.
         H("local function _sk(_x,_m) local _t={} for _i=1,#_x do _t[_i]=string.char(_x:byte(_i)~_m) end return table.concat(_t) end")
 
-        -- ── Emit config table via indirect (XOR-decoded) field names ──────────
-        -- The cfg table must match the shape expected by runtime/vm.lua:
-        --   cfg.key, cfg.nonce, cfg.sxor, cfg.sha, cfg.revmap
-        -- None of those field-name strings appear literally below.
+        -- ── Emit config table via polymorphic field-assignment patterns ────────
+        -- The cfg table fields (key, nonce, sxor, sha, revmap) are set using
+        -- 5 structurally-distinct patterns so consecutive assignments never look
+        -- alike.  Every pattern still hides the field name via _sk().
         HF("local %s={}", cfg_var)
-        HF("%s[_sk(%s,%d)]=_b91d(%s)", cfg_var, kf_enc,  kf_mask,  key_b91_lit)
-        HF("%s[_sk(%s,%d)]=_b91d(%s)", cfg_var, nf_enc,  nf_mask,  nonce_b91_lit)
-        HF("%s[_sk(%s,%d)]=%d",         cfg_var, sf_enc,  sf_mask,  sxor_byte)
-        HF("%s[_sk(%s,%d)]={[0]=%s}",   cfg_var, shf_enc, shf_mask, table.concat(sha_entries, ","))
-        HF("%s[_sk(%s,%d)]={[0]=%s}",   cfg_var, rmf_enc, rmf_mask, table.concat(rm_entries, ","))
+
+        -- Pool of structurally-distinct field-assignment emitters.
+        -- Each returns a complete Lua statement string that sets cfg[name]=val.
+        local _fe = {
+            -- A: do-block, local holds the decoded field name, then assign.
+            function(tbl, kexpr, vexpr)
+                local ln = utils.rand_name(4, 8)
+                return string.format("do local %s=%s; %s[%s]=%s end", ln, kexpr, tbl, ln, vexpr)
+            end,
+            -- B: rawset(tbl, decoded_key, value) — no visible indexing at all.
+            function(tbl, kexpr, vexpr)
+                return string.format("rawset(%s,%s,%s)", tbl, kexpr, vexpr)
+            end,
+            -- C: IIFE that returns the key; assigned with normal [] syntax.
+            function(tbl, kexpr, vexpr)
+                return string.format("%s[(function() return %s end)()]=%s", tbl, kexpr, vexpr)
+            end,
+            -- D: do-block, local holds the value first, then the key is decoded inline.
+            function(tbl, kexpr, vexpr)
+                local lv = utils.rand_name(4, 8)
+                return string.format("do local %s=%s; %s[%s]=%s end", lv, vexpr, tbl, kexpr, lv)
+            end,
+            -- E: do-block with two separate locals for key and value before assign.
+            function(tbl, kexpr, vexpr)
+                local lk = utils.rand_name(4, 8)
+                local lv = utils.rand_name(4, 8)
+                return string.format("do local %s=%s; local %s=%s; %s[%s]=%s end",
+                    lk, kexpr, lv, vexpr, tbl, lk, lv)
+            end,
+        }
+
+        -- Emit each field with a different variant (no two consecutive fields
+        -- share the same pattern index).
+        local _last_fe = 0
+        local function emit_cfg_field(kexpr, vexpr)
+            local idx
+            repeat idx = math.random(1, #_fe) until idx ~= _last_fe
+            _last_fe = idx
+            H(_fe[idx](cfg_var, kexpr, vexpr))
+        end
+
+        emit_cfg_field(
+            string.format("_sk(%s,%d)", kf_enc,  kf_mask),
+            string.format("_b91d(%s)", key_b91_lit))
+        emit_cfg_field(
+            string.format("_sk(%s,%d)", nf_enc,  nf_mask),
+            string.format("_b91d(%s)", nonce_b91_lit))
+        emit_cfg_field(
+            string.format("_sk(%s,%d)", sf_enc,  sf_mask),
+            tostring(sxor_byte))
+        emit_cfg_field(
+            string.format("_sk(%s,%d)", shf_enc, shf_mask),
+            string.format("{[0]=%s}", table.concat(sha_entries, ",")))
+        emit_cfg_field(
+            string.format("_sk(%s,%d)", rmf_enc, rmf_mask),
+            string.format("{[0]=%s}", table.concat(rm_entries, ",")))
 
         -- HTTP loader (Roblox game:HttpGet)
         -- Runtime URL: split into masked chunks so the plain URL never appears literally.
