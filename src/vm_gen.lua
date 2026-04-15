@@ -1220,7 +1220,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     -- Each anti-tamper check is stored as XOR-encoded bytes; this helper
     -- decodes them at runtime and executes them via load() so that none of
     -- the check logic (error strings, API names) appears as readable text.
-    LF("local function %s(_e,_m) if type(%s)~='function' then return end local _t={} for _i=1,#_e do _t[_i]=string.char(%s(_e:byte(_i),_m)) end local _f=%s(table.concat(_t));if type(_f)=='function' then _f() end end", vAtExec, vLoadCompat, bXor, vLoadCompat)
+    LF("local function %s(_e,_m) if type(%s)~='function' then error('Catify: environment tampered (loader)',0) end local _t={} for _i=1,#_e do _t[_i]=string.char(%s(_e:byte(_i),_m)) end local _f,_er=%s(table.concat(_t));if type(_f)~='function' then error('Catify: anti-tamper check failed',0) end _f() end", vAtExec, vLoadCompat, bXor, vLoadCompat)
 
     -- Lua-level helper: XOR-encode `code_str` with a random byte mask and
     -- emit a call to vAtExec(encoded_string, mask) into the generated source.
