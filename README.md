@@ -85,7 +85,7 @@ chat command.
 | `CATIFY_PREFIX` | `!` | Command prefix |
 | `CATIFY_PASSES` | `1` | Obfuscation passes (1 or 2) |
 | `CATIFY_ROBLOX` | `false` | Enable tiny Roblox HTTP-runtime output mode |
-| `CATIFY_ROBLOX_RUNTIME_URL` | `""` | Optional custom runtime URL for Roblox mode |
+| `CATIFY_ROBLOX_RUNTIME_URL` | `""` | Optional custom runtime URL for Roblox mode (enables Roblox mode when set) |
 | `CATIFY_MAX_INLINE` | `32768` | Max inline code size in bytes |
 | `CATIFY_MAX_FILE` | `524288` | Max attachment size in bytes |
 
