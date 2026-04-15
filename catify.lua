@@ -40,20 +40,15 @@ local BANNER = [[
     --intensity N   Junk density: 0=minimal 1=normal 2=high 3=extreme (default: 1)
     --no-strip      Do not strip debug info from the bytecode
     --passes N      Number of full obfuscation passes (default: 1; max: 3)
-    --roblox [URL]  Tiny Roblox output: VM loaded via game:HttpGet from URL.
-                    Defaults to the official Catify runtime on GitHub raw.
-                    Enable HTTP in your game settings before using this mode.
 ]]
 
 -- Intensity → junk cluster count ranges
 local INTENSITY_RANGES = {
-    [0] = { min=2,  max=6  },
-    [1] = { min=10, max=24 },
-    [2] = { min=24, max=52 },
-    [3] = { min=48, max=96 },
+    [0] = { min=1,  max=4  },
+    [1] = { min=5,  max=14 },
+    [2] = { min=12, max=24 },
+    [3] = { min=20, max=40 },
 }
-
-local DEFAULT_ROBLOX_RT_URL = "https://raw.githubusercontent.com/francyw22/catify/main/runtime/vm.lua"
 
 -- ─── Argument parsing ─────────────────────────────────────────────────────────
 local function parse_args(argv)
@@ -65,7 +60,6 @@ local function parse_args(argv)
         strip      = true,
         passes     = 1,
         intensity  = 1,    -- 0=minimal, 1=normal, 2=high, 3=extreme
-        http_url   = nil,  -- non-nil → Roblox HTTP-runtime mode
     }
     local i = 1
     while i <= #argv do
@@ -87,16 +81,6 @@ local function parse_args(argv)
             i = i + 1
             opts.intensity = math.max(0, math.min(3, math.floor(tonumber(argv[i])
                              or error("--intensity requires a number 0-3"))))
-        elseif a == "--roblox" then
-            -- Optional next argument: custom runtime URL.  If the next token looks
-            -- like a URL (starts with "http"), consume it; otherwise use default.
-            local next_a = argv[i+1]
-            if next_a and next_a:sub(1,4) == "http" then
-                opts.http_url = next_a
-                i = i + 1
-            else
-                opts.http_url = DEFAULT_ROBLOX_RT_URL
-            end
         elseif a:sub(1, 2) == "--" then
             error("Unknown option: " .. a)
         elseif not opts.input then
@@ -202,19 +186,13 @@ local function main(argv)
         }
 
         -- Run all bytecode-level passes
-        local final_proto, revmap, _, vm_meta
-        final_proto, revmap, _, vm_meta = Passes.run_all(proto, Utils, pass_opts)
+        local final_proto, revmap
+        final_proto, revmap = Passes.run_all(proto, Utils, pass_opts)
 
         -- Generate VM + encrypted output
         info("  Generating VM code...")
-        local generated = VmGen.generate(final_proto, revmap, key, nonce, Utils, vm_meta, opts.http_url)
+        local generated = VmGen.generate(final_proto, revmap, key, nonce, Utils)
         info("  Generated VM size: %d bytes", #generated)
-
-        if opts.http_url then
-            -- HTTP-runtime mode: single pass only (output is not re-compilable Lua VM).
-            result_code = generated
-            break
-        end
 
         if pass < opts.passes then
             -- Wrap the generated code and re-compile it for the next pass
@@ -245,13 +223,7 @@ local function main(argv)
     local output_size   = #result_code
     info("Done!  %d → %d bytes  (%.1fx)",
          original_size, output_size, output_size / math.max(1, original_size))
-    if opts.http_url then
-        info("Mode: Roblox HTTP-runtime  (VM loaded from %s)", opts.http_url)
-        info("Protected with: opcode shuffle, AES-256-CTR encryption, SHA-256 integrity, debug strip, junk injection (intensity %d)", opts.intensity)
-        info("NOTE: Enable HTTP requests in game settings before running the protected script.")
-    else
-        info("Protected with: opcode shuffle, AES-256-CTR encryption, SHA-256 integrity, debug strip, junk injection (intensity %d), VM dispatch obfuscation, anti-tamper checks, anti-env-logger checks", opts.intensity)
-    end
+    info("Protected with: opcode shuffle, AES-256-CTR encryption, SHA-256 integrity, debug strip, junk injection (intensity %d), VM dispatch obfuscation, anti-tamper (14 checks), anti-env-logger (2 checks)", opts.intensity)
 end
 
 main(arg)

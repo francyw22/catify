@@ -7,7 +7,7 @@
          custom binary format.
       2. Encrypt that blob with AES-256-CTR (32-byte key + 8-byte nonce supplied by the caller).
       3. Emit a self-contained Lua 5.3 source file that:
-            • Loads Base91 payload, checks SHA-256 integrity, decrypts with AES-256-CTR.
+           • Decodes Base91 payload, checks SHA-256 integrity, decrypts with AES-256-CTR.
            • Runs a complete Lua 5.3 virtual machine implementing all 47 opcodes.
            • Uses shuffled opcode numbers, random local-variable names, and a
              state-machine dispatch loop for control-flow obfuscation.
@@ -89,13 +89,10 @@ local function serialize_proto(proto, sxor)
         elseif ct == "string" then
             w(ser_u8(5))
             if sxor and sxor ~= 0 then
-                -- XOR each byte with a position-dependent key: sxor XOR (constant_index MOD 256).
-                -- This means each constant string has a unique effective key, so XOR-decrypting
-                -- one constant's key does not immediately reveal keys for adjacent constants.
-                local str_key = (sxor ~ (i % 256)) & 0xFF
+                -- XOR each byte with the per-session key before storing.
                 local enc = {}
-                for bi = 1, #c do
-                    enc[bi] = string.char(c:byte(bi) ~ str_key)
+                for i = 1, #c do
+                    enc[i] = string.char(c:byte(i) ~ sxor)
                 end
                 w(ser_str(table.concat(enc)))
             else
@@ -124,9 +121,15 @@ end
 
 -- ─── Lua source code builder ───────────────────────────────────────────────────
 
--- The payload is emitted as a Base91 string.
--- At runtime the VM decodes it back to the encrypted bytecode blob.
+-- The payload is Base91-encoded and emitted as a single quoted string literal.
+-- Base91 uses only safe printable ASCII characters, making the output resilient
+-- to any third-party tool that processes or re-encodes the generated Lua file.
 local PAYLOAD_VAR_NAME = "superflow_bytecode"
+local function emit_payload_b91(b91str)
+    -- Assign the base91 string to a global variable (no `local` so it is
+    -- accessible both from outside and inside the do-block).
+    return PAYLOAD_VAR_NAME .. "=" .. string.format("%q", b91str) .. ";"
+end
 
 -- Emit an integer as a Lua numeric literal (optionally obfuscated).
 local function int_lit(n)
@@ -136,21 +139,18 @@ end
 -- ─── VM Lua template (generated with random names at call time) ────────────────
 
 --- Generate the complete obfuscated Lua source for the given proto.
----@param proto    table      Top-level proto (opcodes already shuffled in .code arrays)
----@param revmap   table      revmap[shuffled_op] = real_op  (0-indexed)
----@param key      string     AES-256 key (32 bytes) used to encrypt the bytecode blob
----@param nonce    string     AES-256-CTR nonce (8 bytes)
----@param utils    table      The Utils module (for aes256_ctr, sha256, base91_enc, rand_names)
----@param vm_meta  table|nil  Optional VM metadata ({ virtual_ops = {...} })
----@param http_url string|nil When set, emit a tiny HTTP-loader output instead of an embedded VM.
----                           The URL must point to a hosted copy of runtime/vm.lua.
+---@param proto   table   Top-level proto (opcodes already shuffled in .code arrays)
+---@param revmap  table   revmap[shuffled_op] = real_op  (0-indexed)
+---@param key     string  AES-256 key (32 bytes) used to encrypt the bytecode blob
+---@param nonce   string  AES-256-CTR nonce (8 bytes)
+---@param utils   table   The Utils module (for aes256_ctr, sha256, base91_enc, rand_names)
 ---@return string  Lua source
-function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
+function VmGen.generate(proto, revmap, key, nonce, utils)
     -- ── 1. Serialize + encrypt the custom bytecode ───────────────────────────
     local sxor_byte = math.random(1, 255)     -- per-session string XOR key
     local raw  = serialize_proto(proto, sxor_byte)
     local blob = utils.aes256_ctr(raw, key, nonce)
-    local blob_b91 = utils.base91_enc(blob)
+    local b91_blob = utils.base91_enc(blob)   -- Base91-encode for safe single-string payload
 
     -- ── 2. Generate random identifiers for all locals ───────────────────────
     -- We need ~80 unique names for VM internals
@@ -185,12 +185,22 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     local aesKe     = vn()   -- key expand function name
     local aesEb     = vn()   -- block encrypt function name
     local vNonce    = vn()   -- nonce variable name
-    local vB91Dec   = vn()   -- Base91 decoder function name
     -- SHA-256 inline variables
     local shaFn     = vn()   -- sha256 function name
     local shaK      = vn()   -- K constants table name (unused var, kept for naming pool)
     local shaH      = vn()   -- hash state name
     local shaW      = vn()   -- message schedule name
+    -- Base91 inline decoder variables
+    local b91Alpha  = vn()   -- alphabet string variable
+    local b91Dec    = vn()   -- decoder function name
+    local b91Tbl    = vn()   -- lookup table name
+    local b91V      = vn()   -- v variable
+    local b91B      = vn()   -- b variable
+    local b91N_     = vn()   -- n variable (trailing _ to avoid clash with Lua keyword)
+    local b91Out    = vn()   -- output table
+    local b91P      = vn()   -- p (decoded value) variable
+    local b91I      = vn()   -- input parameter name
+
     -- Execute function params/locals
     local eProto    = vn()
     local eUpvals   = vn()
@@ -284,13 +294,6 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     local rdI4le = vn()
     local rdF64le = vn()
     local wrU4be = vn()
-    -- Misc generated-code names (randomized so they don't appear as fixed strings)
-    local vDispatchHandler = vn()  -- local that holds the resolved handler function
-    local vBit32Flag       = vn()  -- boolean: is bit32 library available?
-    local vTostr           = vn()  -- alias for tostring
-    local vTypefn          = vn()  -- alias for type
-    local vPcallfn         = vn()  -- alias for pcall
-    local vPayload         = vn()  -- encrypted payload table variable name (randomized)
 
     -- Helper: emit an obfuscated integer expression using the runtime bXor function
     -- so no ~ operator appears in the generated output (Luau/Lua 5.1 compatible).
@@ -303,322 +306,6 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
         blob_sha_words[i] = string.unpack(">I4", blob_sha, i*4+1)
     end
 
-    -- ── HTTP-runtime mode: emit tiny output (payload + config + loader) ───────
-    -- When http_url is provided the full VM is NOT embedded.  Instead we emit:
-    --   1. The encrypted payload table (small — just the user's bytecode).
-    --   2. A config table with the per-run keys, nonces, SHA words, and revmap.
-    --   3. A one-liner that fetches runtime/vm.lua from the given URL and calls it.
-    if http_url then
-        local out = {}
-        local function H(s) out[#out+1] = s .. "\n" end
-        local function HF(fmt, ...) H(string.format(fmt, ...)) end
-
-        -- Payload string (encrypted bytecode in Base91, same format as full mode)
-        local payload_var = utils.rand_name(4, 8)
-        out[#out+1] = string.format("local %s=%q\n", payload_var, blob_b91)
-
-        -- Config table: key/nonce in Base91 and decoded at runtime,
-        -- sha-256 integrity words, sxor byte, and shuffled→real opcode revmap.
-        local cfg_var = utils.rand_name(4, 8)
-        local key_b91 = utils.base91_enc(key)
-        local nonce_b91 = utils.base91_enc(nonce)
-        local b91_alpha_lit = string.format("%q", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,./:;<=>?@[]^_`{|}~\"")
-        local key_b91_lit = string.format("%q", key_b91)
-        local nonce_b91_lit = string.format("%q", nonce_b91)
-
-        -- SHA-256 expected words
-        local sha_entries = {}
-        for i = 0, 7 do sha_entries[i+1] = tostring(blob_sha_words[i]) end
-
-        -- Revmap: 47 entries (shuffled 0..46 → real op).
-        local rm_entries = {}
-        for shuffled = 0, 46 do
-            rm_entries[shuffled+1] = tostring(revmap[shuffled] or 0)
-        end
-
-        -- Helper (at generation time): XOR-encode a string with a random mask,
-        -- producing a string.char(...) literal and the mask used.
-        local function xor_field(s)
-            local mask = math.random(1, 255)
-            local bytes = {}
-            for i = 1, #s do bytes[i] = tostring(s:byte(i) ~ mask) end
-            return string.format("string.char(%s)", table.concat(bytes, ",")), mask
-        end
-
-        -- Pre-encode every CFG field name so that the literal strings "key",
-        -- "nonce", "sxor", "sha", "revmap" never appear in the generated output.
-        local kf_enc,  kf_mask  = xor_field("key")
-        local nf_enc,  nf_mask  = xor_field("nonce")
-        local sf_enc,  sf_mask  = xor_field("sxor")
-        local shf_enc, shf_mask = xor_field("sha")
-        local rmf_enc, rmf_mask = xor_field("revmap")
-
-        -- ── Junk dead-code blocks (~110 KB total) ──────────────────────────────
-        -- Each block is a self-contained `do local _X={N1,N2,...} end` that
-        -- allocates and immediately discards a large random-number table.
-        -- Blocks are syntactically valid Lua and never affect execution.
-        -- Number of entries per block and number of blocks are tuned so that
-        -- the collapsed single-line output grows by ≥100 KB.
-        local JUNK_BLOCKS   = 9
-        local JUNK_PER_BLOCK = 2000   -- numeric entries per table (~12 KB each)
-        for _jb = 1, JUNK_BLOCKS do
-            local jname = utils.rand_name(6, 12)
-            local entries = {}
-            for _je = 1, JUNK_PER_BLOCK do
-                entries[_je] = tostring(math.random(0, 999999999))
-            end
-            H("do local " .. jname .. "={" .. table.concat(entries, ",") .. "} end")
-        end
-
-        -- ── Runtime helper functions ────────────────────────────────────────────
-
-        -- Base91 decoder for key/nonce (emitted into the output script).
-        HF("local function _b91d(_s)")
-        HF("  local _a=%s", b91_alpha_lit)
-        HF("  local _m={}")
-        HF("  for _i=1,#_a do _m[_a:byte(_i)]=_i-1 end")
-        HF("  local _v,_b,_n=-1,0,0")
-        HF("  local _o={}")
-        HF("  for _i=1,#_s do")
-        HF("    local _p=_m[_s:byte(_i)]")
-        HF("    if _p~=nil then")
-        HF("      if _v<0 then")
-        HF("        _v=_p")
-        HF("      else")
-        HF("        _v=_v+_p*91")
-        HF("        _b=_b+(_v*(2^_n))")
-        HF("        if (_v%%8192)>88 then _n=_n+13 else _n=_n+14 end")
-        HF("        while _n>7 do _o[#_o+1]=string.char(_b%%256); _b=math.floor(_b/256); _n=_n-8 end")
-        HF("        _v=-1")
-        HF("      end")
-        HF("    end")
-        HF("  end")
-        HF("  if _v>-1 then _o[#_o+1]=string.char((_b+_v*(2^_n))%%256) end")
-        HF("  return table.concat(_o)")
-        H("end")
-
-        -- Luau-safe XOR helper (avoids native `~` bitwise operator in generated code).
-        H("local function _bx(_a,_b) local _r,_p=0,1 while _a>0 or _b>0 do local _x,_y=_a%2,_b%2 if _x~=_y then _r=_r+_p end _a=(_a-_x)/2 _b=(_b-_y)/2 _p=_p*2 end return _r end")
-
-        -- XOR field-name decoder: _sk(encoded_bytes, mask) → plain string.
-        -- Used to reconstruct "key","nonce","sxor","sha","revmap" at runtime
-        -- without those literal strings appearing anywhere in the generated code.
-        H("local function _sk(_x,_m) local _t={} for _i=1,#_x do _t[_i]=string.char(_bx(_x:byte(_i),_m)) end return table.concat(_t) end")
-
-        -- ── Emit config table via polymorphic field-assignment patterns ────────
-        -- The cfg table fields (key, nonce, sxor, sha, revmap) are set using
-        -- 15 structurally-distinct patterns so no two consecutive assignments look
-        -- alike.  Every pattern hides the field name via _sk().
-        HF("local %s={}", cfg_var)
-
-        -- Pool of structurally-distinct field-assignment emitters.
-        -- Each returns a complete Lua statement string that sets tbl[name]=val.
-        local _fe = {
-            -- 1: do-block — local for key, then bracket assign.
-            function(tbl, kexpr, vexpr)
-                local lk = utils.rand_name(4, 8)
-                return string.format("do local %s=%s; %s[%s]=%s end", lk, kexpr, tbl, lk, vexpr)
-            end,
-            -- 2: rawset(tbl, key, val) — no bracket indexing visible.
-            function(tbl, kexpr, vexpr)
-                return string.format("rawset(%s,%s,%s)", tbl, kexpr, vexpr)
-            end,
-            -- 3: IIFE key — (function() return key end)() used as index.
-            function(tbl, kexpr, vexpr)
-                return string.format("%s[(function() return %s end)()]=%s", tbl, kexpr, vexpr)
-            end,
-            -- 4: do-block — local for value first, key decoded inline.
-            function(tbl, kexpr, vexpr)
-                local lv = utils.rand_name(4, 8)
-                return string.format("do local %s=%s; %s[%s]=%s end", lv, vexpr, tbl, kexpr, lv)
-            end,
-            -- 5: do-block — two separate locals (key then value) then assign.
-            function(tbl, kexpr, vexpr)
-                local lk = utils.rand_name(4, 8)
-                local lv = utils.rand_name(4, 8)
-                return string.format("do local %s=%s; local %s=%s; %s[%s]=%s end",
-                    lk, kexpr, lv, vexpr, tbl, lk, lv)
-            end,
-            -- 6: select-wrapper — select(1, val) strips vararg, rawset with it.
-            function(tbl, kexpr, vexpr)
-                local lk = utils.rand_name(4, 8)
-                return string.format("do local %s=%s; rawset(%s,%s,(select(1,%s))) end",
-                    lk, kexpr, tbl, lk, vexpr)
-            end,
-            -- 7: table.pack then unpack the single value via [1].
-            function(tbl, kexpr, vexpr)
-                local lk = utils.rand_name(4, 8)
-                local lp = utils.rand_name(4, 8)
-                return string.format("do local %s=%s; local %s=table.pack(%s); %s[%s]=%s[1] end",
-                    lk, kexpr, lp, vexpr, tbl, lk, lp)
-            end,
-            -- 8: pcall wrapper — pcall(rawset, tbl, key, val) always succeeds.
-            function(tbl, kexpr, vexpr)
-                return string.format("pcall(rawset,%s,%s,%s)", tbl, kexpr, vexpr)
-            end,
-            -- 9: IIFE value — value produced inside an immediately-called closure.
-            function(tbl, kexpr, vexpr)
-                return string.format("%s[%s]=(function() return %s end)()", tbl, kexpr, vexpr)
-            end,
-            -- 10: nested do-blocks — outer holds key, inner assigns.
-            function(tbl, kexpr, vexpr)
-                local lk = utils.rand_name(4, 8)
-                return string.format("do local %s=%s do %s[%s]=%s end end", lk, kexpr, tbl, lk, vexpr)
-            end,
-            -- 11: coroutine.wrap IIFE for the value — exotic call shape.
-            function(tbl, kexpr, vexpr)
-                local lk = utils.rand_name(4, 8)
-                return string.format(
-                    "do local %s=%s; %s[%s]=coroutine.wrap(function() coroutine.yield(%s) end)() end",
-                    lk, kexpr, tbl, lk, vexpr)
-            end,
-            -- 12: or-guard form — key decoded into local; rawset inside assert.
-            function(tbl, kexpr, vexpr)
-                local lk = utils.rand_name(4, 8)
-                return string.format("do local %s=%s; assert(rawset(%s,%s,%s)) end",
-                    lk, kexpr, tbl, lk, vexpr)
-            end,
-            -- 13: local fn alias for rawset, then call it.
-            function(tbl, kexpr, vexpr)
-                local lf = utils.rand_name(4, 8)
-                return string.format("do local %s=rawset; %s(%s,%s,%s) end",
-                    lf, lf, tbl, kexpr, vexpr)
-            end,
-            -- 14: key+value both in locals inside do; assign via rawset.
-            function(tbl, kexpr, vexpr)
-                local lk = utils.rand_name(4, 8)
-                local lv = utils.rand_name(4, 8)
-                return string.format("do local %s=%s; local %s=%s; rawset(%s,%s,%s) end",
-                    lk, kexpr, lv, vexpr, tbl, lk, lv)
-            end,
-            -- 15: IIFE wraps both key and val; rawset inside.
-            function(tbl, kexpr, vexpr)
-                return string.format("(function(_k,_v) rawset(%s,_k,_v) end)(%s,%s)",
-                    tbl, kexpr, vexpr)
-            end,
-            -- 16: if true then guard — hides assignment inside dead-looking branch.
-            function(tbl, kexpr, vexpr)
-                local lk = utils.rand_name(4, 8)
-                return string.format("if true then local %s=%s; %s[%s]=%s end",
-                    lk, kexpr, tbl, lk, vexpr)
-            end,
-            -- 17: repeat-until-true — single-iteration loop.
-            function(tbl, kexpr, vexpr)
-                local lk = utils.rand_name(4, 8)
-                return string.format("repeat local %s=%s; %s[%s]=%s until true",
-                    lk, kexpr, tbl, lk, vexpr)
-            end,
-            -- 18: three nested locals — decoy re-assignment before final write.
-            function(tbl, kexpr, vexpr)
-                local la = utils.rand_name(4, 8)
-                local lb = utils.rand_name(4, 8)
-                local lk = utils.rand_name(4, 8)
-                return string.format(
-                    "do local %s=%s; local %s=%s; local %s=%s; %s[%s]=%s end",
-                    la, vexpr, lb, kexpr, lk, lb, tbl, lk, la)
-            end,
-            -- 19: rawset via a table.pack that discards count field.
-            function(tbl, kexpr, vexpr)
-                local lk = utils.rand_name(4, 8)
-                local lp = utils.rand_name(4, 8)
-                return string.format(
-                    "do local %s=%s; local %s=table.pack(%s); %s.n=nil; rawset(%s,%s,%s[1]) end",
-                    lk, kexpr, lp, vexpr, lp, tbl, lk, lp)
-            end,
-            -- 20: IIFE for key AND value, passed to rawset inside the call.
-            function(tbl, kexpr, vexpr)
-                return string.format(
-                    "(function() rawset(%s,(function() return %s end)(),(function() return %s end)()) end)()",
-                    tbl, kexpr, vexpr)
-            end,
-        }
-
-        -- Emit each field with a different variant (no two consecutive fields
-        -- share the same pattern index).
-        local _last_fe = 0
-        local function emit_cfg_field(kexpr, vexpr)
-            local idx
-            repeat idx = math.random(1, #_fe) until idx ~= _last_fe
-            _last_fe = idx
-            H(_fe[idx](cfg_var, kexpr, vexpr))
-        end
-
-        emit_cfg_field(
-            string.format("_sk(%s,%d)", kf_enc,  kf_mask),
-            string.format("_b91d(%s)", key_b91_lit))
-        emit_cfg_field(
-            string.format("_sk(%s,%d)", nf_enc,  nf_mask),
-            string.format("_b91d(%s)", nonce_b91_lit))
-        emit_cfg_field(
-            string.format("_sk(%s,%d)", sf_enc,  sf_mask),
-            tostring(sxor_byte))
-        emit_cfg_field(
-            string.format("_sk(%s,%d)", shf_enc, shf_mask),
-            string.format("{[0]=%s}", table.concat(sha_entries, ",")))
-        emit_cfg_field(
-            string.format("_sk(%s,%d)", rmf_enc, rmf_mask),
-            string.format("{[0]=%s}", table.concat(rm_entries, ",")))
-
-        -- HTTP loader (Roblox game:HttpGet)
-        -- Runtime URL: split into masked chunks so the plain URL never appears literally.
-        local url_chunks, url_masks = {}, {}
-        local url_chunk_size = 7
-        for i = 1, #http_url, url_chunk_size do
-            local chunk = http_url:sub(i, i + url_chunk_size - 1)
-            local mask = math.random(1, 255)
-            local bytes = {}
-            for j = 1, #chunk do
-                bytes[#bytes+1] = tostring(chunk:byte(j) ~ mask)
-            end
-            url_masks[#url_masks+1] = mask
-            url_chunks[#url_chunks+1] = string.format("string.char(%s)", table.concat(bytes, ","))
-        end
-
-        local ok_var = utils.rand_name(4, 8)
-        local err_var = utils.rand_name(4, 8)
-        HF("local %s,%s=pcall(function()", ok_var, err_var)
-        HF("  local _u=(function()")
-        HF("    local _ut={}")
-        for idx = 1, #url_chunks do
-            HF("    do local _m=%d; local _c=%s; for _j=1,#_c do _ut[#_ut+1]=string.char(_bx(_c:byte(_j),_m)) end end",
-                url_masks[idx], url_chunks[idx])
-        end
-        HF("    return table.concat(_ut)")
-        HF("  end)()")
-        HF("  do")
-        HF("    local _jn={}")
-        HF("    local _sx=0")
-        HF("    for _i=1,17 do")
-        HF("      _jn[_i]=((_i*37)+13)%%256")
-        HF("      _sx=(_sx+_bx(_jn[_i],(_i*11)))%%65536")
-        HF("    end")
-        HF("    if _sx==65537 then error('Catify: invalid runtime probe',0) end")
-        HF("  end")
-        HF("  local _src=game:HttpGet(_u,true)")
-        HF("  local _L=(type(loadstring)=='function' and loadstring) or (type(load)=='function' and load)")
-        HF("  if type(_L)~='function' then error('Catify: load/loadstring unavailable',0) end")
-        HF("  local _chunk,_cerr=_L(_src)")
-        HF("  if type(_chunk)~='function' then error('Catify: runtime compile failed: '..tostring(_cerr),0) end")
-        HF("  local _rt=_chunk()")
-        HF("  if type(_rt)~='function' then error('Catify: runtime entry not found',0) end")
-        HF("  _rt(%s,_b91d(%s))", cfg_var, payload_var)
-        H("end)")
-        HF("if not %s then error('Catify: failed to load runtime - '..tostring(%s),0) end", ok_var, err_var)
-
-        local body = (table.concat(out):gsub("[\r\n]+", " "))
-        local wrapped = {}
-        local wLoad = utils.rand_name(4, 8)
-        local wChunk = utils.rand_name(4, 8)
-        local wErr = utils.rand_name(4, 8)
-        wrapped[#wrapped+1] = string.format("local %s=(type(loadstring)=='function' and loadstring) or (type(load)=='function' and load)", wLoad)
-        wrapped[#wrapped+1] = string.format("if type(%s)~='function' then error('Catify: load/loadstring unavailable',0) end", wLoad)
-        wrapped[#wrapped+1] = string.format("local %s,%s=%s(\"%s\")", wChunk, wErr, wLoad, utils.to_escape(body))
-        wrapped[#wrapped+1] = string.format("if type(%s)~='function' then error('Catify: wrapped compile failed: '..tostring(%s),0) end", wChunk, wErr)
-        wrapped[#wrapped+1] = string.format("%s()", wChunk)
-        return table.concat(wrapped, " ")
-    end
-    -- ── End HTTP-runtime mode ─────────────────────────────────────────────────
-
     -- ── 4. Build the fwdmap (real opcode → shuffled opcode) ─────────────────
     -- The dispatch table will be indexed by shuffled opcodes so that the
     -- real opcode numbers are not visible in the generated output.
@@ -626,13 +313,13 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     for shuffled = 0, 46 do
         fwdmap[revmap[shuffled] or shuffled] = shuffled
     end
-    local virtual_ops = (vm_meta and vm_meta.virtual_ops) or {}
 
     -- ── 4. Junk-code snippets (opaque predicates, dead branches) ─────────────
-    -- Each form picks its own fresh random names so that consecutive junk blocks
-    -- never share the same variable identifiers.
-    -- Generate a per-session pool of 60 unique opaque names for junk locals.
-    local _JN = utils.rand_names(60)
+    -- Each form picks its own fresh single-letter or short names so that
+    -- consecutive junk blocks never share the same variable identifiers.
+    -- Fifteen human-style single/two-letter names to draw from; forms pick
+    -- 2-3 distinct ones so the pattern varies visually.
+    local _JN = {"x","y","n","v","t","a","b","s","c","r","m","p","q","k","e"}
     local function jpick()
         return _JN[math.random(1, #_JN)]
     end
@@ -650,7 +337,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
         return _JN[i], _JN[j], _JN[k2]
     end
 
-    -- Fourteen forms of always-dead opaque predicates / no-op computations:
+    -- Ten forms of always-dead opaque predicates / no-op computations:
     --  form 1: x XOR x == 0, never > 0
     --  form 2: n // n == 1, never < 1
     --  form 3: (a+b)*c - (a+b)*c == 0, never > 1
@@ -661,10 +348,6 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     --  form 8: string.rep + #  identity
     --  form 9: fake config table with dead branch (looks like real init code)
     --  form 10: fake string sanitize (dead upper/lower branch)
-    --  form 11: byte-pack round-trip identity with dead mismatch branch
-    --  form 12: deterministic accumulator fold (dead negative branch)
-    --  form 13: fake checksum state machine (dead overflow branch)
-    --  form 14: shuffled byte-lookup table build (decoy cipher setup)
     local junk_forms = {
         -- form 1: x XOR x == 0
         function(indent)
@@ -672,8 +355,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
             local a = math.random(1, 0x7FFF)
             local b = math.random(1, 0xFF)
             return string.format(
-                "%sdo local %s=%d*%d;local %s=_bX_(%s,%s);if %s>0 then %s=%s+%d end end\n",
-                indent, v1, a, b, v2, v1, v1, v2, v1, v1, math.random(1, 0xFF))
+                "%sdo local %s=%d*%d;local %s=%s(%s,%s);if %s>0 then %s=%s+%d end end\n",
+                indent, v1, a, b, v2, bXor, v1, v1, v2, v1, v1, math.random(1, 0xFF))
         end,
         -- form 2: integer division identity
         function(indent)
@@ -720,8 +403,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
             local y = math.random(1, 0xFFFF)
             local z = x ~ y
             return string.format(
-                "%sdo local %s=%d;local %s=%d;local %s=_bX_(%s,%s);if _bX_(%s,%s)>0 then %s=_bO_(%s,1) end end\n",
-                indent, v1, x, v2, y, v3, v1, v2, v3, v1, v2, v2)
+                "%sdo local %s=%d;local %s=%d;local %s=%s(%s,%s);if %s(%s,%s)>0 then %s=%s(%s,1) end end\n",
+                indent, v1, x, v2, y, v3, bXor, v1, v2, bXor, v3, v1, v2, bOr, v2)
         end,
         -- form 7: math.max identity (always picks first arg)
         function(indent)
@@ -760,133 +443,15 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
                 "%sdo local %s=%q;local %s=string.upper(%s);if #%s<0 then %s=%s end end\n",
                 indent, v1, w, v2, v1, v2, v1, v2)
         end,
-        -- form 11: byte-pack round-trip identity
-        function(indent)
-            local v1, v2 = jpick2()
-            local c = string.char(math.random(97, 122))
-            return string.format(
-                "%sdo local %s=%q;local %s=string.char(string.byte(%s));if %s~=%s then %s=nil end end\n",
-                indent, v1, c, v2, v1, v2, v1, v2)
-        end,
-        -- form 12: deterministic accumulator fold
-        function(indent)
-            local v1, v2 = jpick2()
-            local n = math.random(3, 9)
-            local base = math.random(2, 40)
-            return string.format(
-                "%sdo local %s=%d;for %s=1,%d do %s=%s+1 end;if %s<0 then %s=%s-1 end end\n",
-                indent, v1, base, v2, n, v1, v1, v1, v1, v1)
-        end,
-        -- form 13: fake checksum state machine
-        function(indent)
-            local v1, v2, v3 = jpick3()
-            local a = math.random(10, 90)
-            local b = math.random(3, 25)
-            return string.format(
-                "%sdo local %s=%d;local %s=%d;local %s=_bA_(%s,%s);if %s>2147483647 then %s=0 end end\n",
-                indent, v1, a, v2, b, v3, v1, v2, v3, v3)
-        end,
-        -- form 14: shuffled byte-lookup table build (decoy cipher setup, result discarded)
-        function(indent)
-            local v1, v2, v3 = jpick3()
-            local n = math.random(16, 32)
-            return string.format(
-                "%sdo local %s={};for _i=1,%d do %s[_i]=_i end;local %s=0;for _,_v in ipairs(%s) do %s=_bA_(%s+_v,32767) end;if %s<0 then %s=nil end end\n",
-                indent, v1, n, v1, v2, v1, v2, v2, v2, v3)
-        end,
     }
     local function junk_stmt(indent)
         return junk_forms[math.random(1, #junk_forms)](indent)
     end
-    -- Emit `k` junk statements encoded as a Base91 chunk decoded+loaded at runtime.
-    -- The chunk is wrapped in a function accepting (_bX_,_bA_,_bO_) so the
-    -- placeholder names in junk_forms resolve to the actual bitwise helpers.
+    -- Emit `k` consecutive junk statements with the given indent.
     local function junk_block(indent, k)
-        local stmts = {}
-        for _ = 1, k do stmts[#stmts+1] = junk_stmt("") end
-        local body = table.concat(stmts):gsub("[\r\n]+", " ")
-        local chunk_src = "return function(_bX_,_bA_,_bO_) " .. body .. " end"
-        local b91 = utils.base91_enc(chunk_src)
-        return string.format(
-            "%sdo local _jf=%s(%s(%q));if type(_jf)=='function' then local _jb=_jf();if type(_jb)=='function' then %s(_jb,%s,%s,%s) end end end\n",
-            indent, vLoadCompat, vB91Dec, b91, vPcallfn, bXor, bAnd, bOr)
-    end
-
-    -- Context-aware junk forms: reference live VM variables so static analysis
-    -- cannot trivially remove them (the variables are real, only the branches are dead).
-    -- These must only be emitted INSIDE the execute function where all VM locals are in scope.
-    local ctx_junk_forms = {
-        -- ctx form 1: read type of register-0 value; dead branch on impossible type name
-        function(indent)
-            local v1 = jpick()
-            return string.format(
-                "%sdo local %s=type(_eR_[0] and _eR_[0].v or nil);if %s=='userdata' and false then %s=nil end end\n",
-                indent, v1, v1, v1)
-        end,
-        -- ctx form 2: PC is always >= 0 after reset; dead negative branch
-        function(indent)
-            local v1, v2 = jpick2()
-            return string.format(
-                "%sdo local %s=_eP_;local %s=%s+0;if %s<-131071 then %s=%s+1 end end\n",
-                indent, v1, v2, v1, v2, v1, v2)
-        end,
-        -- ctx form 3: eTop starts at -1, multiplied by 0 gives 0, dead non-zero branch
-        function(indent)
-            local v1 = jpick()
-            return string.format(
-                "%sdo local %s=_eT_*0;if %s~=0 then %s=%s+1 end end\n",
-                indent, v1, v1, v1, v1)
-        end,
-        -- ctx form 4: proto.maxstacksize is always a positive integer, never < 0
-        function(indent)
-            local v1, v2 = jpick2()
-            return string.format(
-                "%sdo local %s=_ePr_.maxstacksize or 0;local %s=%s*%s;if %s<0 then %s=%s end end\n",
-                indent, v1, v2, v1, v1, v2, v1, v1)
-        end,
-        -- ctx form 5: eCode is always a table; type check, dead string branch
-        function(indent)
-            local v1 = jpick()
-            return string.format(
-                "%sdo local %s=type(_eC_);if %s=='string' then error('',0) end end\n",
-                indent, v1, v1)
-        end,
-        -- ctx form 6: args table is always a table (never nil after vPack)
-        function(indent)
-            local v1 = jpick()
-            return string.format(
-                "%sdo local %s=type(_eAr_);if %s~='table' and false then %s=%s end end\n",
-                indent, v1, v1, v1, v1)
-        end,
-        -- ctx form 7: accumulate XOR of ePc with a constant; result is dead (never inspected)
-        function(indent)
-            local v1, v2 = jpick2()
-            local magic = math.random(1, 0x7FFF)
-            return string.format(
-                "%sdo local %s=%d;local %s=_bX_(%s,_eP_);if %s>0x7FFFFFFF and false then %s=0 end end\n",
-                indent, v1, magic, v2, v1, v2, v2)
-        end,
-        -- ctx form 8: inspect a high register slot type (these are always table boxes)
-        function(indent)
-            local v1 = jpick()
-            local hi_reg = math.random(200, 220)
-            return string.format(
-                "%sdo local %s=_eR_[%d];if type(%s)~='table' and false then %s=nil end end\n",
-                indent, v1, hi_reg, v1, v1)
-        end,
-    }
-    local function ctx_junk_block(indent, k)
-        local stmts = {}
-        for _ = 1, k do
-            stmts[#stmts+1] = ctx_junk_forms[math.random(1, #ctx_junk_forms)]("")
-        end
-        local body = table.concat(stmts):gsub("[\r\n]+", " ")
-        local chunk_src = "return function(_bX_,_bA_,_bO_,_eR_,_eP_,_eT_,_ePr_,_eC_,_eAr_) " .. body .. " end"
-        local b91 = utils.base91_enc(chunk_src)
-        return string.format(
-            "%sdo local _jf=%s(%s(%q));if type(_jf)=='function' then local _jb=_jf();if type(_jb)=='function' then %s(_jb,%s,%s,%s,%s,%s,%s,%s,%s,%s) end end end\n",
-            indent, vLoadCompat, vB91Dec, b91, vPcallfn,
-            bXor, bAnd, bOr, eRegs, ePc, eTop, eProto, eCode, eArgs)
+        local out = {}
+        for _ = 1, k do out[#out+1] = junk_stmt(indent) end
+        return table.concat(out)
     end
 
     -- ── 5. Assemble source ────────────────────────────────────────────────────
@@ -897,12 +462,12 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     -- ── Header comment (minimal, for compact output) ─────────────────────────
     -- (intentionally omitted for compact output)
 
-    -- ── Base91 payload string at the top (emitted before do block) ─────────────
-    src[#src+1] = string.format("%s=%q;\n", vPayload, blob_b91)
+    -- ── Base91-encoded payload at the top (emitted before do block) ──────────
+    src[#src+1] = emit_payload_b91(b91_blob) .. "\n"
 
     -- Wrap all VM internals in a do...end block so locals don't pollute global scope
     L("do")
-    LF("local %s=tostring;local %s=type;local %s=pcall", vTostr, vTypefn, vPcallfn)
+    L("local _=tostring;local __=type;local ___=pcall")
     LF("local %s=(type(load)=='function' and load) or (type(loadstring)=='function' and loadstring) or nil", vLoadCompat)
     LF("local %s=(table and table.pack) or function(...) return {n=select('#', ...),...} end", vPack)
     LF("local %s=(table and table.unpack) or unpack", vUnpack)
@@ -910,8 +475,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     -- Bitwise compat: use bit32 library if available (Roblox Luau), otherwise
     -- compile native Lua 5.3 operators via loader so the Luau parser never sees ~, &, |, <<, >>
     LF("local %s,%s,%s,%s,%s,%s", bXor,bNot,bAnd,bOr,bShl,bShr)
-    LF("local %s=type(bit32)=='table' and type(bit32.bxor)=='function' and type(bit32.bnot)=='function' and type(bit32.band)=='function' and type(bit32.bor)=='function'", vBit32Flag)
-    LF("if %s then", vBit32Flag)
+    LF("local bit32Available=type(bit32)=='table' and type(bit32.bxor)=='function' and type(bit32.bnot)=='function' and type(bit32.band)=='function' and type(bit32.bor)=='function'")
+    LF("if bit32Available then")
     LF("  %s=bit32.bxor;%s=bit32.bnot;%s=bit32.band;%s=bit32.bor", bXor,bNot,bAnd,bOr)
     -- bit32.lshift and bit32.rshift may be absent in some Roblox Luau builds.
     -- Fall back to a math-based equivalent using bit32.band (always present).
@@ -929,21 +494,6 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     -- Binary helpers: avoid hard dependency on string.pack/unpack at runtime.
     LF("local function %s(_s,_p) local _b1,_b2,_b3,_b4=_s:byte(_p,_p+3);return _b1+_b2*256+_b3*65536+_b4*16777216,_p+4 end", rdU4le)
     LF("local function %s(_s,_p) local _v,_np=%s(_s,_p);if _v>=2147483648 then _v=_v-4294967296 end;return _v,_np end", rdI4le, rdU4le)
-    LF("local function %s(_s)", vB91Dec)
-    LF("  local _a=%q", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,./:;<=>?@[]^_`{|}~\"")
-    LF("  local _m={};for _i=1,#_a do _m[_a:byte(_i)]=_i-1 end")
-    LF("  local _v,_b,_n=-1,0,0;local _o={}")
-    LF("  for _i=1,#_s do local _p=_m[_s:byte(_i)]")
-    LF("    if _p~=nil then")
-    LF("      if _v<0 then _v=_p else")
-    LF("        _v=_v+_p*91;_b=_b+(_v*(2^_n));if (_v%%8192)>88 then _n=_n+13 else _n=_n+14 end")
-    LF("        while _n>7 do _o[#_o+1]=string.char(_b%%256);_b=math.floor(_b/256);_n=_n-8 end;_v=-1")
-    LF("      end")
-    LF("    end")
-    LF("  end")
-    LF("  if _v>-1 then _o[#_o+1]=string.char((_b+_v*(2^_n))%%256) end")
-    LF("  return table.concat(_o)")
-    LF("end")
     LF("local function %s(_s,_p)", rdF64le)
     LF("  if type(string.unpack)=='function' then return string.unpack('<d',_s,_p) end")
     LF("  local _DBL_BIAS=1023")
@@ -959,8 +509,23 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     LF("end")
     LF("local function %s(_v) return string.char(%s(%s(_v,24),255),%s(%s(_v,16),255),%s(%s(_v,8),255),%s(_v,255)) end", wrU4be, bAnd, bShr, bAnd, bShr, bAnd, bShr, bAnd)
     -- Junk block at top of do-scope (dead computations, not reachable by any real code path)
-    src[#src+1] = junk_block("", math.random(4, 8))
     src[#src+1] = junk_block("", math.random(2, 4))
+    -- ── Emit payload concatenation helper (decoy wrapper using allocated names) ──
+    -- ── Real inline Base91 decoder (decodes the payload back to the AES blob) ──
+    LF("local %s=%q", b91Alpha, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,./:;<=>?@[]^_`{|}~\"")
+    LF("local %s={}", b91Tbl)
+    LF("for _i=1,#%s do %s[%s:byte(_i)]=_i-1 end", b91Alpha, b91Tbl, b91Alpha)
+    LF("local function %s(%s)", b91Dec, b91I)
+    LF("  local %s,%s,%s=-1,0,0 local %s={}", b91V, b91B, b91N_, b91Out)
+    LF("  for _i=1,#%s do local %s=%s[%s:byte(_i)]", b91I, b91P, b91Tbl, b91I)
+    LF("    if %s~=nil then if %s<0 then %s=%s", b91P, b91V, b91V, b91P)
+    LF("    else %s=%s+%s*91 %s=%s(%s,%s(%s,%s))", b91V, b91V, b91P, b91B, bOr, b91B, bShl, b91V, b91N_)
+    LF("      if %s(%s,8191)>88 then %s=%s+13 else %s=%s+14 end", bAnd, b91V, b91N_, b91N_, b91N_, b91N_)
+    LF("      repeat %s[#%s+1]=string.char(%s(%s,255)) %s=%s(%s,8) %s=%s-8 until %s<=7", b91Out, b91Out, bAnd, b91B, b91B, bShr, b91B, b91N_, b91N_, b91N_)
+    LF("      %s=-1 end end end", b91V)
+    LF("  if %s>-1 then %s[#%s+1]=string.char(%s(%s(%s,%s(%s,%s)),255)) end", b91V, b91Out, b91Out, bAnd, bOr, b91B, bShl, b91V, b91N_)
+    LF("  return table.concat(%s) end", b91Out)
+    src[#src+1] = junk_block("", math.random(1, 2))
     -- ── Emit inline AES-256-CTR decrypt ─────────────────────────────────────
     -- S-box table literal
     local sbox_vals = {0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16}
@@ -1037,7 +602,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     LF("  return table.concat(_out)")
     LF("end")
     -- Junk block between AES function and deserializer
-    src[#src+1] = junk_block("", math.random(3, 6))
+    src[#src+1] = junk_block("", math.random(2, 3))
     -- Decoy function: looks like a secondary hash/encode but is never called.
     -- Its body is all dead computation (XOR mixing on random constants).
     do
@@ -1102,7 +667,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     LF("    elseif t==2 then k[i]=true")
     LF("    elseif t==3 then k[i]=%s()", dRi64)
     LF("    elseif t==4 then k[i]=%s()", dRf64)
-    LF("    elseif t==5 then local _sx=%s();local _sk=%s(%s,%s(i,255));local _sd={};for _si=1,#_sx do _sd[_si]=string.char(%s(_sx:byte(_si),_sk))end;k[i]=table.concat(_sd)", dRstr, bXor, vStrXor, bAnd, bXor)
+    LF("    elseif t==5 then local _sx=%s();local _sd={};for _si=1,#_sx do _sd[_si]=string.char(%s(_sx:byte(_si),%s))end;k[i]=table.concat(_sd)", dRstr, bXor, vStrXor)
     LF("    end")
     LF("  end")
     -- Upvalues
@@ -1118,13 +683,13 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
 
     -- (dispatch table indexed by shuffled opcode – no separate revmap needed)
     -- Junk block after VM setup
-    src[#src+1] = junk_block("", math.random(2, 5))
+    src[#src+1] = junk_block("", math.random(1, 3))
 
     -- The execute function (dispatch-table based)
     LF("local function %s(%s,%s,...)", vExec, eProto, eUpvals)
     LF("  local %s=%s(...)", eArgs, vPack)
-    -- Junk at function entry (eRegs/ePc/eTop not yet in scope; use generic forms)
-    src[#src+1] = junk_block("  ", math.random(2, 4))
+    -- Junk at function entry
+    src[#src+1] = junk_block("  ", math.random(1, 2))
     -- Allocate register boxes (auto-create missing boxes via metatable)
     LF("  local %s=setmetatable({},{__index=function(t,k) local b={};t[k]=b;return b end})", eRegs)
     LF("  for %s=0,%s.maxstacksize+63 do %s[%s]={} end", eI, eProto, eRegs, eI)
@@ -1152,8 +717,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
 
     -- ── Opcode dispatch table: one closure per opcode, indexed by real opcode ──
     LF("  local %s={}", vDispatch)
-    -- Context-aware junk between table creation and first handler (all VM vars now in scope)
-    src[#src+1] = ctx_junk_block("  ", math.random(2, 4))
+    -- Junk between table creation and first handler
+    src[#src+1] = junk_block("  ", math.random(1, 2))
 
     -- [0] MOVE
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s[%s].v end",
@@ -1171,7 +736,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     -- [4] LOADNIL
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) for _i=%s,%s+%s do %s[_i].v=nil end end",
        vDispatch, fwdmap[4], eA,eB,eC,eBx,eSBx, eA,eA,eB, eRegs)
-    src[#src+1] = junk_block("  ", math.random(1, 2))   -- junk between handler groups
+    src[#src+1] = junk_block("  ", 1)   -- junk between handler groups
     -- [5] GETUPVAL (defensive: nil upval box → nil)
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) local _u=%s[%s];%s[%s].v=_u and _u.v or nil end",
        vDispatch, fwdmap[5], eA,eB,eC,eBx,eSBx, eUpvals,eB, eRegs,eA)
@@ -1190,7 +755,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     -- [10] SETTABLE
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v[%s(%s)]=%s(%s) end",
        vDispatch, fwdmap[10], eA,eB,eC,eBx,eSBx, eRegs,eA, eRk,eB, eRk,eC)
-    src[#src+1] = junk_block("  ", math.random(1, 2))
+    src[#src+1] = junk_block("  ", 1)
     -- [11] NEWTABLE
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v={} end",
        vDispatch, fwdmap[11], eA,eB,eC,eBx,eSBx, eRegs,eA)
@@ -1205,7 +770,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)^%s(%s) end", vDispatch,fwdmap[17],eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)/%s(%s) end", vDispatch,fwdmap[18],eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)//%s(%s) end",vDispatch,fwdmap[19],eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
-    src[#src+1] = junk_block("  ", math.random(1, 2))
+    src[#src+1] = junk_block("  ", 1)
     -- [20..24] Bitwise: BAND BOR BXOR SHL SHR
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s(%s),%s(%s)) end",  vDispatch,fwdmap[20],eA,eB,eC,eBx,eSBx, eRegs,eA,bAnd,eRk,eB,eRk,eC)
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s(%s),%s(%s)) end",  vDispatch,fwdmap[21],eA,eB,eC,eBx,eSBx, eRegs,eA,bOr, eRk,eB,eRk,eC)
@@ -1217,7 +782,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s[%s].v) end",       vDispatch,fwdmap[26],eA,eB,eC,eBx,eSBx, eRegs,eA,bNot,eRegs,eB)
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=not %s[%s].v end",  vDispatch,fwdmap[27],eA,eB,eC,eBx,eSBx, eRegs,eA,eRegs,eB)
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=#%s[%s].v end",     vDispatch,fwdmap[28],eA,eB,eC,eBx,eSBx, eRegs,eA,eRegs,eB)
-    src[#src+1] = junk_block("  ", math.random(1, 2))
+    src[#src+1] = junk_block("  ", 1)
     -- [29] CONCAT
     LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, fwdmap[29], eA,eB,eC,eBx,eSBx)
     LF("    local _t={}")
@@ -1242,7 +807,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     LF("    if(not not %s[%s].v)==(%s~=0) then %s[%s].v=%s[%s].v else %s=%s+1 end",
        eRegs,eB,eC, eRegs,eA,eRegs,eB, ePc,ePc)
     LF("  end")
-    src[#src+1] = junk_block("  ", math.random(1, 2))
+    src[#src+1] = junk_block("  ", 1)
     -- [36] CALL
     LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, fwdmap[36], eA,eB,eC,eBx,eSBx)
     LF("    local %s=%s[%s].v", eFn,eRegs,eA)
@@ -1277,7 +842,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     LF("    %s=0", eRetN)
     LF("    for _i=%s,%s do %s=%s+1;%s[%s]=%s[_i].v end", eA,eNelem,eRetN,eRetN,eRetVals,eRetN,eRegs)
     LF("  end")
-    src[#src+1] = junk_block("  ", math.random(1, 2))
+    src[#src+1] = junk_block("  ", 1)
     -- [39] FORLOOP
     LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, fwdmap[39], eA,eB,eC,eBx,eSBx)
     LF("    %s[%s].v=%s[%s].v+%s[%s+2].v", eRegs,eA,eRegs,eA,eRegs,eA)
@@ -1301,7 +866,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     LF("    if %s[%s+1].v~=nil then %s[%s].v=%s[%s+1].v;%s=%s+%s end",
        eRegs,eA, eRegs,eA,eRegs,eA, ePc,ePc,eSBx)
     LF("  end")
-    src[#src+1] = junk_block("  ", math.random(1, 2))
+    src[#src+1] = junk_block("  ", 1)
     -- [43] SETLIST
     -- LFIELDS_PER_FLUSH = 50 (matches Lua 5.3 lvm.c constant).
     -- When C==0 the block number is in the next EXTRAARG instruction's Ax field.
@@ -1341,12 +906,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     LF("  end")
     -- [46] EXTRAARG  (consumed by LOADKX/SETLIST; treated as no-op if reached alone)
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) end", vDispatch, fwdmap[46], eA,eB,eC,eBx,eSBx)
-    -- [47..63] VM-only virtual opcodes (decoy/no-op handlers for junk payload)
-    for _, vop in ipairs(virtual_ops) do
-        LF("  %s[%d]=function(%s,%s,%s,%s,%s) end", vDispatch, vop, eA,eB,eC,eBx,eSBx)
-    end
 
-    src[#src+1] = ctx_junk_block("  ", math.random(2, 4))
+    src[#src+1] = junk_block("  ", math.random(1, 2))
 
     -- ── Pre-compute obfuscated mask/shift constants (evaluated once) ──────────
     local _m63   = _obfInt(0x3F)
@@ -1365,14 +926,6 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     LF("  local %s=%s local %s=%s", eMask18,_m18, eBias,_bias)
     LF("  local %s=%s local %s=%s local %s=%s", eSh6,_sh6, eSh14,_sh14, eSh23,_sh23)
 
-    -- ── Opaque predicate before dispatch loop ────────────────────────────────
-    -- math.abs(ePc) is always >= 0, so math.abs(ePc) + 1 > 0 is always true.
-    -- The dead branch references a live VM variable (ePc) making static removal
-    -- harder: an analyser must prove ePc >= 0 globally to eliminate the branch.
-    do
-        local vOp1 = jpick()
-        LF("  do local %s=math.abs(%s)+1;if %s<=0 then %s=%s end end", vOp1,ePc,vOp1,ePc,ePc)
-    end
     -- ── Main fetch-decode-dispatch loop ──────────────────────────────────────
     LF("  while not %s do", eDone)
     LF("    local %s=%s[%s]", eInst,eCode,ePc)
@@ -1383,13 +936,13 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     LF("    local %s=%s(%s(%s,%s),%s)",   eC,  bAnd,bShr,eInst,eSh14,eMask511)
     LF("    local %s=%s(%s(%s,%s),%s)",   eBx, bAnd,bShr,eInst,eSh14,eMask18)
     LF("    local %s=%s-%s",         eSBx,eBx,eBias)
-    LF("    local %s=%s[%s]", vDispatchHandler, vDispatch,eOp)
-    LF("    if %s then %s(%s,%s,%s,%s,%s) else error('Catify: unknown opcode '..tostring(%s),0) end", vDispatchHandler,vDispatchHandler,eA,eB,eC,eBx,eSBx,eOp)
+    LF("    local %s=%s[%s]", "_dh_", vDispatch,eOp)
+    LF("    if %s then %s(%s,%s,%s,%s,%s) else error('Catify: unknown opcode '..tostring(%s),0) end", "_dh_","_dh_",eA,eB,eC,eBx,eSBx,eOp)
     LF("  end")
     LF("  return %s(%s,1,%s)", vUnpack,eRetVals,eRetN)
     LF("end")  -- end execute function
     -- Junk block after execute function definition
-    src[#src+1] = junk_block("", math.random(4, 8))
+    src[#src+1] = junk_block("", math.random(2, 4))
 
     -- ── Main: anti-tamper, decrypt, deserialize, run ──────────
     -- The payload table (superflow_bytecode) was already emitted at the top of the file.
@@ -1505,8 +1058,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     LF("  local _out={};for _i=1,8 do local _w=%s[_i];_out[_i]=string.char(_w//16777216,(_w//65536)%%256,(_w//256)%%256,_w%%256) end;return table.concat(_out)", shaH)
     LF("end")
     -- Decode Base91 payload into vBlob (binary AES-encrypted blob)
-    LF("local %s=%s(%s)", vBlob, vB91Dec, vPayload)
-    LF("%s=nil", vPayload)   -- wipe payload after decoding
+    LF("local %s=%s(%s)", vBlob, b91Dec, PAYLOAD_VAR_NAME)
+    LF("%s=nil", PAYLOAD_VAR_NAME)   -- wipe payload after decoding
     -- SHA-256 integrity check: compute hash and compare 8 words
     LF("local %s=%s(%s)", atSha, shaFn, vBlob)
     local sha_checks = {}
@@ -1541,7 +1094,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     -- Each anti-tamper check is stored as XOR-encoded bytes; this helper
     -- decodes them at runtime and executes them via load() so that none of
     -- the check logic (error strings, API names) appears as readable text.
-    LF("local function %s(_e,_m) if type(%s)~='function' then error('Catify: environment tampered (loader)',0) end local _t={} for _i=1,#_e do _t[_i]=string.char(%s(_e:byte(_i),_m)) end local _f,_er=%s(table.concat(_t));if type(_f)~='function' then local _v=_VERSION;if type(_v)=='string' and _v:find('Luau',1,true) then return end;error('Catify: anti-tamper check failed',0) end _f() end", vAtExec, vLoadCompat, bXor, vLoadCompat)
+    LF("local function %s(_e,_m) if type(%s)~='function' then return end local _t={} for _i=1,#_e do _t[_i]=string.char(%s(_e:byte(_i),_m)) end local _f=%s(table.concat(_t));if type(_f)=='function' then _f() end end", vAtExec, vLoadCompat, bXor, vLoadCompat)
 
     -- Lua-level helper: XOR-encode `code_str` with a random byte mask and
     -- emit a call to vAtExec(encoded_string, mask) into the generated source.
@@ -1601,15 +1154,6 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
         at_load("do if type(coroutine)~='table' or type(coroutine.wrap)~='function' then error('Catify: environment tampered (coroutine)',0) end end")
     end
 
-    -- Anti-tamper 11: math.huge must be positive infinity (not overridden with a finite value)
-    at_load("do if not(math.huge>1e308)or math.huge~=math.huge*2 then error('Catify: environment tampered (huge)',0) end end")
-
-    -- Anti-tamper 12: string.format must produce correct decimal output
-    at_load("do if string.format('%d',42)~='42' or string.format('%05d',7)~='00007' then error('Catify: environment tampered (format)',0) end end")
-
-    -- Anti-tamper 13: pcall must correctly propagate multiple return values
-    at_load("do local _ok,_a,_b=pcall(function()return 11,22 end);if not _ok or _a~=11 or _b~=22 then error('Catify: environment tampered (pcall-ret)',0) end end")
-
     -- Anti-keylogger 1: no active debug hook (self-contained, more thorough check)
     at_load(string.format("do local _k;pcall(function() local _ce=%s;local _d=(type(_ce)=='table' and rawget(_ce,'debug')) or nil;if _d and type(_d.gethook)=='function' then _k=_d.gethook() end end);if _k~=nil then error('Catify: keylogger detected',0) end end", env_expr))
 
@@ -1642,63 +1186,6 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     if math.random(1, 2) == 1 then
         at_load("do local _m=getmetatable(0);if _m~=nil then error('Catify: env logger detected (nummt)',0)end end")
     end
-    -- Anti-environmental logger 4: detect Lua-level hooks over critical C builtins.
-    -- Roblox-safe: only runs when debug.getinfo exists.
-    if math.random(1, 2) == 1 then
-        local env_hook_check = table.concat({
-            "do local _ce=%s;local _d=(type(_ce)=='table' and rawget(_ce,'debug')) or nil;",
-            "local _gi=_d and rawget(_d,'getinfo');",
-            "if type(_gi)=='function' then local _chk={tostring,type,pcall,rawget,rawset,string.byte,string.char,table.concat,math.abs};",
-            "for _,_f in ipairs(_chk) do local _ok,_inf=pcall(_gi,_f);",
-            "if _ok and type(_inf)=='table' and _inf.what and _inf.what~='C' then error('Catify: env logger detected (hookfn)',0) end end end end",
-        })
-        at_load(string.format(env_hook_check, env_expr))
-    end
-    -- Anti-environmental logger 5: loader function should remain a native C closure.
-    -- Roblox-safe: guarded by debug.getinfo availability.
-    if math.random(1, 2) == 1 then
-        local loader_hook_check = table.concat({
-            "do local _ce=%s;local _d=(type(_ce)=='table' and rawget(_ce,'debug')) or nil;",
-            "local _gi=_d and rawget(_d,'getinfo');",
-            "local _ld=(type(load)=='function' and load) or (type(loadstring)=='function' and loadstring);",
-            "if type(_gi)=='function' and type(_ld)=='function' then local _ok,_inf=pcall(_gi,_ld);",
-            "if _ok and type(_inf)=='table' and _inf.what and _inf.what~='C' then error('Catify: env logger detected (loaderhook)',0) end end end",
-        })
-        at_load(string.format(loader_hook_check, env_expr))
-    end
-
-    -- Anti-environmental logger 6: tostring address-spoof detection.
-    -- Some Roblox environment loggers hook tostring() and return a fixed/collapsed
-    -- address for every table, making two distinct tables stringify identically.
-    -- In a legitimate runtime, distinct tables always have distinct addresses.
-    -- Compare the LAST 8 characters (low-order hex digits) which always differ
-    -- between consecutively allocated tables, avoiding false positives from
-    -- shared high-order bits while still catching loggers that return a fixed
-    -- address for every table.
-    -- On detection: a randomly chosen deterrent message is printed (wrapped in pcall
-    -- so even a broken print cannot prevent the error), then execution is aborted.
-    -- tick() is Roblox-specific; the fallback to os.time keeps this standard-Lua-safe.
-    at_load(table.concat({
-        "do",
-        " local _t1=tostring({});local _t2=tostring({});",
-        "local _a1=string.sub(_t1,-8);local _a2=string.sub(_t2,-8);",
-        "if _a1==_a2 then ",
-        "pcall(function()",
-        "local _ts=(type(tick)=='function' and tick())",
-        "or (type(os)=='table' and type(os.time)=='function' and os.time()) or 0;",
-        "math.randomseed(_ts);",
-        "local _m={",
-        '"yk i always wonder if skids like you have a life outside of discord lmfao",',
-        '"you must be a loser irl to be this chronically online in discord",',
-        '"what a sad way to spend your time honestly",',
-        '"remember to take a shower! you stink lil bro",',
-        '"imagine trying to log roblox scripts in 2026 you are a certified loser"',
-        "};",
-        "print(_m[math.random(1,#_m)])",
-        "end);",
-        "error('Catify: env logger detected (tostring)',0)",
-        "end end",
-    }))
 
     -- Watermark: obfuscated ASCII cat watermark (sits in memory, never printed)
     local wm_bytes = {32,32,47,92,95,47,92,32,32,10,32,40,111,46,111,32,41,10,32,32,62,32,94,32,60,10,32,67,97,116,105,102,121,32,118,50,46,48}
@@ -1743,74 +1230,26 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
        vExec, vProto, vEnv)
     L("end")
 
-    -- ── Bootstrap XOR-encode + compact ────────────────────────────────────────
-    -- src[1] is the payload table declaration (emitted as-is, stays visible as global).
-    -- src[2..end] is the entire VM body – compact it, XOR-encode it, and wrap it
-    -- in a tiny Luau-compatible loader so no bootstrap source leaks as plaintext.
-    local payload_decl = src[1]   -- "<vPayload>={...};\n"
-    local vm_full = table.concat(src, "", 2)
-    local vm_lines = {}
-    for line in vm_full:gmatch("[^\n]+") do
-        local trimmed = line:match("^%s*(.+)$")
-        if trimmed then trimmed = trimmed:match("^(.-)%s*$") end
+    -- ── Compact post-processing: strip indentation and join lines ────────────
+    local full = table.concat(src)
+    local compact_lines = {}
+    for line in full:gmatch("[^\n]+") do
+        -- Strip leading whitespace, then strip trailing whitespace separately
+        local trimmed = line:match("^%s*(.+)$")        if trimmed then
+            trimmed = trimmed:match("^(.-)%s*$")
+        end
         if trimmed and trimmed ~= "" then
-            vm_lines[#vm_lines + 1] = trimmed
+            compact_lines[#compact_lines + 1] = trimmed
         end
     end
-    local vm_compact = table.concat(vm_lines, " ")
-
-    -- XOR-encode the compact VM source with a random 1-byte key so no bootstrap
-    -- structure, error strings, or operator source literals appear in plaintext.
-    local bs_key = math.random(1, 255)
-
-    -- Build a 256-byte lookup-table for decoding (avoids ~ operator: Luau-safe).
-    -- decode_tbl[i+1] = chr(i XOR bs_key); at runtime: decode[enc_byte+1] = src_byte.
-    local decode_tbl = {}
-    for i = 0, 255 do decode_tbl[i+1] = string.char(i ~ bs_key) end
-    local decode_str = utils.to_escape(table.concat(decode_tbl))
-
-    -- XOR-encode each byte of the compact VM source.
-    local enc_bytes = {}
-    for i = 1, #vm_compact do enc_bytes[i] = vm_compact:byte(i) ~ bs_key end
-
-    -- Split encoded bytes into string.char() chunks of 200 (Lua register-limit safe).
-    -- Use a table constructor {chunk1, chunk2, ...} joined with table.concat() at
-    -- runtime; this avoids the register-limit hit from a long `..` concatenation chain.
-    local BS_CHUNK = 200
-    local enc_parts = {}
-    for i = 1, #enc_bytes, BS_CHUNK do
-        local chunk = {}
-        for j = i, math.min(i + BS_CHUNK - 1, #enc_bytes) do
-            chunk[#chunk + 1] = tostring(enc_bytes[j])
-        end
-        enc_parts[#enc_parts + 1] = "string.char(" .. table.concat(chunk, ",") .. ")"
-    end
-    -- Table-constructor expression: {chunk1, chunk2, ...}  decoded via table.concat at runtime.
-    local enc_expr = "{" .. table.concat(enc_parts, ",") .. "}"
-
-    -- Tiny outer bootstrap loader (pure Lua 5.1+/Luau, no bitwise operators):
-    -- look up each encoded byte in the XOR decode table, then execute via load().
-    -- The decoded VM body sees the payload global (vPayload) still in scope.
-    local loader_src = string.format(
-        "(function()" ..
-        "local _L=(type(load)=='function' and load)or(type(loadstring)=='function' and loadstring);" ..
-        "if not _L then return end;" ..
-        "local _xt=\"%s\";" ..
-        "local _et=%s;" ..
-        "local _e=table.concat(_et);" ..
-        "local _d={};" ..
-        "for _i=1,#_e do _d[_i]=string.char(_xt:byte(_e:byte(_i)+1)) end;" ..
-        "_L(table.concat(_d))()" ..
-        "end)()",
-        decode_str, enc_expr)
-
-    -- Prepend header block comment (Luarmor-style)
+    -- Prepend ASCII watermark as a block comment at the top of the output file
     local watermark = "--[[\n"
-        .. "        Catify -- Lua script protector.\n"
-        .. " this code runs & decrypts & executes protected Lua scripts\n"
-        .. "\n"
+        .. "   /\\_/\\  \n"
+        .. "  ( o.o ) \n"
+        .. "   > ^ <  \n"
+        .. "  Catify v2.0.0 -- Protected by Catify\n"
         .. "]]\n"
-    return watermark .. payload_decl .. loader_src
+    return watermark .. table.concat(compact_lines, " ")
 end
 
 return VmGen

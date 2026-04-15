@@ -48,9 +48,6 @@ const PREFIX       = process.env.CATIFY_PREFIX || "!";
 const PASSES       = Math.max(1, Math.min(2, parseInt(process.env.CATIFY_PASSES  || "1", 10)));
 const MAX_INLINE   = parseInt(process.env.CATIFY_MAX_INLINE || String(32  * 1024), 10);
 const MAX_FILE     = parseInt(process.env.CATIFY_MAX_FILE   || String(512 * 1024), 10);
-const ROBLOX_RT_URL = String(process.env.CATIFY_ROBLOX_RUNTIME_URL || "https://raw.githubusercontent.com/francyw22/catify/refs/heads/main/runtime/vm.lua").trim();
-const ROBLOX_FLAG = String(process.env.CATIFY_ROBLOX || "").trim();
-const ROBLOX_MODE  = /^(1|true|yes|on)$/i.test(ROBLOX_FLAG) || ROBLOX_RT_URL.length > 0;
 
 if (!TOKEN) {
     console.error("Error: CATIFY_TOKEN is not set. Create bot/.env from .env.example.");
@@ -123,18 +120,12 @@ async function obfuscate(source, passes) {
     try {
         fs.writeFileSync(inFile, source, "utf8");
 
-        const args = [
+        await execFileAsync("lua", [
             CATIFY_CLI,
             inFile,
             outFile,
             "--passes", String(passes),
-        ];
-        if (ROBLOX_MODE) {
-            args.push("--roblox");
-            if (ROBLOX_RT_URL) args.push(ROBLOX_RT_URL);
-        }
-
-        await execFileAsync("lua", args, { timeout: 60000 });
+        ], { timeout: 60000 });
 
         return fs.readFileSync(outFile, "utf8");
     } finally {
@@ -172,10 +163,6 @@ const client = new Client({
 client.once("ready", () => {
     console.log(`[Catify Bot] Logged in as ${client.user.tag}`);
     console.log(`[Catify Bot] Prefix: ${PREFIX}`);
-    console.log(`[Catify Bot] Roblox HTTP-runtime mode: ${ROBLOX_MODE ? "ON" : "OFF"}`);
-    if (ROBLOX_MODE && ROBLOX_RT_URL) {
-        console.log(`[Catify Bot] Roblox runtime URL: ${ROBLOX_RT_URL}`);
-    }
     console.log(`[Catify Bot] Ready!`);
     client.user.setActivity(`Catify | ${PREFIX}catify help`);
 });
