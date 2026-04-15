@@ -89,10 +89,13 @@ local function serialize_proto(proto, sxor)
         elseif ct == "string" then
             w(ser_u8(5))
             if sxor and sxor ~= 0 then
-                -- XOR each byte with the per-session key before storing.
+                -- XOR each byte with a position-dependent key: sxor XOR (constant_index MOD 256).
+                -- This means each constant string has a unique effective key, so XOR-decrypting
+                -- one constant's key does not immediately reveal keys for adjacent constants.
+                local str_key = (sxor ~ (i % 256)) & 0xFF
                 local enc = {}
-                for i = 1, #c do
-                    enc[i] = string.char(c:byte(i) ~ sxor)
+                for bi = 1, #c do
+                    enc[bi] = string.char(c:byte(bi) ~ str_key)
                 end
                 w(ser_str(table.concat(enc)))
             else
@@ -494,6 +497,77 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
         return table.concat(out)
     end
 
+    -- Context-aware junk forms: reference live VM variables so static analysis
+    -- cannot trivially remove them (the variables are real, only the branches are dead).
+    -- These must only be emitted INSIDE the execute function where all VM locals are in scope.
+    local ctx_junk_forms = {
+        -- ctx form 1: read type of register-0 value; dead branch on impossible type name
+        function(indent)
+            local v1 = jpick()
+            return string.format(
+                "%sdo local %s=type(%s[0] and %s[0].v or nil);if %s=='userdata' and false then %s=nil end end\n",
+                indent, v1, eRegs, eRegs, v1, v1)
+        end,
+        -- ctx form 2: PC is always >= 0 after reset; dead negative branch
+        function(indent)
+            local v1, v2 = jpick2()
+            return string.format(
+                "%sdo local %s=%s;local %s=%s+0;if %s<-131071 then %s=%s+1 end end\n",
+                indent, v1, ePc, v2, v1, v2, v1, v2)
+        end,
+        -- ctx form 3: eTop starts at -1, multiplied by 0 gives 0, dead non-zero branch
+        function(indent)
+            local v1 = jpick()
+            return string.format(
+                "%sdo local %s=%s*0;if %s~=0 then %s=%s+1 end end\n",
+                indent, v1, eTop, v1, v1, v1)
+        end,
+        -- ctx form 4: proto.maxstacksize is always a positive integer, never < 0
+        function(indent)
+            local v1, v2 = jpick2()
+            return string.format(
+                "%sdo local %s=%s.maxstacksize or 0;local %s=%s*%s;if %s<0 then %s=%s end end\n",
+                indent, v1, eProto, v2, v1, v1, v2, v1, v1)
+        end,
+        -- ctx form 5: eCode is always a table; type check, dead string branch
+        function(indent)
+            local v1 = jpick()
+            return string.format(
+                "%sdo local %s=type(%s);if %s=='string' then error('',0) end end\n",
+                indent, v1, eCode, v1)
+        end,
+        -- ctx form 6: args table is always a table (never nil after vPack)
+        function(indent)
+            local v1 = jpick()
+            return string.format(
+                "%sdo local %s=type(%s);if %s~='table' and false then %s=%s end end\n",
+                indent, v1, eArgs, v1, v1, v1)
+        end,
+        -- ctx form 7: accumulate XOR of ePc with a constant; result is dead (never inspected)
+        function(indent)
+            local v1, v2 = jpick2()
+            local magic = math.random(1, 0x7FFF)
+            return string.format(
+                "%sdo local %s=%d;local %s=%s(%s,%s);if %s>0x7FFFFFFF and false then %s=0 end end\n",
+                indent, v1, magic, v2, bXor, v1, ePc, v2, v2)
+        end,
+        -- ctx form 8: inspect a high register slot type (these are always table boxes)
+        function(indent)
+            local v1 = jpick()
+            local hi_reg = math.random(200, 220)
+            return string.format(
+                "%sdo local %s=%s[%d];if type(%s)~='table' and false then %s=nil end end\n",
+                indent, v1, eRegs, hi_reg, v1, v1)
+        end,
+    }
+    local function ctx_junk_block(indent, k)
+        local out = {}
+        for _ = 1, k do
+            out[#out+1] = ctx_junk_forms[math.random(1, #ctx_junk_forms)](indent)
+        end
+        return table.concat(out)
+    end
+
     -- ── 5. Assemble source ────────────────────────────────────────────────────
     local src = {}
     local function L(s) src[#src+1] = s .. "\n" end
@@ -707,7 +781,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     LF("    elseif t==2 then k[i]=true")
     LF("    elseif t==3 then k[i]=%s()", dRi64)
     LF("    elseif t==4 then k[i]=%s()", dRf64)
-    LF("    elseif t==5 then local _sx=%s();local _sd={};for _si=1,#_sx do _sd[_si]=string.char(%s(_sx:byte(_si),%s))end;k[i]=table.concat(_sd)", dRstr, bXor, vStrXor)
+    LF("    elseif t==5 then local _sx=%s();local _sk=%s(%s,%s(i,255));local _sd={};for _si=1,#_sx do _sd[_si]=string.char(%s(_sx:byte(_si),_sk))end;k[i]=table.concat(_sd)", dRstr, bXor, vStrXor, bAnd, bXor)
     LF("    end")
     LF("  end")
     -- Upvalues
@@ -728,7 +802,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     -- The execute function (dispatch-table based)
     LF("local function %s(%s,%s,...)", vExec, eProto, eUpvals)
     LF("  local %s=%s(...)", eArgs, vPack)
-    -- Junk at function entry
+    -- Junk at function entry (eRegs/ePc/eTop not yet in scope; use generic forms)
     src[#src+1] = junk_block("  ", math.random(1, 2))
     -- Allocate register boxes (auto-create missing boxes via metatable)
     LF("  local %s=setmetatable({},{__index=function(t,k) local b={};t[k]=b;return b end})", eRegs)
@@ -757,8 +831,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
 
     -- ── Opcode dispatch table: one closure per opcode, indexed by real opcode ──
     LF("  local %s={}", vDispatch)
-    -- Junk between table creation and first handler
-    src[#src+1] = junk_block("  ", math.random(1, 2))
+    -- Context-aware junk between table creation and first handler (all VM vars now in scope)
+    src[#src+1] = ctx_junk_block("  ", math.random(1, 2))
 
     -- [0] MOVE
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s[%s].v end",
@@ -951,7 +1025,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
         LF("  %s[%d]=function(%s,%s,%s,%s,%s) end", vDispatch, vop, eA,eB,eC,eBx,eSBx)
     end
 
-    src[#src+1] = junk_block("  ", math.random(1, 2))
+    src[#src+1] = ctx_junk_block("  ", math.random(1, 2))
 
     -- ── Pre-compute obfuscated mask/shift constants (evaluated once) ──────────
     local _m63   = _obfInt(0x3F)
@@ -970,6 +1044,14 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     LF("  local %s=%s local %s=%s", eMask18,_m18, eBias,_bias)
     LF("  local %s=%s local %s=%s local %s=%s", eSh6,_sh6, eSh14,_sh14, eSh23,_sh23)
 
+    -- ── Opaque predicate before dispatch loop ────────────────────────────────
+    -- math.abs(ePc) is always >= 0, so math.abs(ePc) + 1 > 0 is always true.
+    -- The dead branch references a live VM variable (ePc) making static removal
+    -- harder: an analyser must prove ePc >= 0 globally to eliminate the branch.
+    do
+        local vOp1 = jpick()
+        LF("  do local %s=math.abs(%s)+1;if %s<=0 then %s=%s end end", vOp1,ePc,vOp1,ePc,ePc)
+    end
     -- ── Main fetch-decode-dispatch loop ──────────────────────────────────────
     LF("  while not %s do", eDone)
     LF("    local %s=%s[%s]", eInst,eCode,ePc)
@@ -1197,6 +1279,15 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     if math.random(1, 2) == 1 then
         at_load("do if type(coroutine)~='table' or type(coroutine.wrap)~='function' then error('Catify: environment tampered (coroutine)',0) end end")
     end
+
+    -- Anti-tamper 11: math.huge must be positive infinity (not overridden with a finite value)
+    at_load("do if not(math.huge>1e308)or math.huge~=math.huge*2 then error('Catify: environment tampered (huge)',0) end end")
+
+    -- Anti-tamper 12: string.format must produce correct decimal output
+    at_load("do if string.format('%d',42)~='42' or string.format('%05d',7)~='00007' then error('Catify: environment tampered (format)',0) end end")
+
+    -- Anti-tamper 13: pcall must correctly propagate multiple return values
+    at_load("do local _ok,_a,_b=pcall(function()return 11,22 end);if not _ok or _a~=11 or _b~=22 then error('Catify: environment tampered (pcall-ret)',0) end end")
 
     -- Anti-keylogger 1: no active debug hook (self-contained, more thorough check)
     at_load(string.format("do local _k;pcall(function() local _ce=%s;local _d=(type(_ce)=='table' and rawget(_ce,'debug')) or nil;if _d and type(_d.gethook)=='function' then _k=_d.gethook() end end);if _k~=nil then error('Catify: keylogger detected',0) end end", env_expr))
