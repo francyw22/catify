@@ -1,0 +1,81 @@
+name: "Copilot Setup Steps"
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+  pull_request:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+
+jobs:
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Install Lua 5.3
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y lua5.3
+          if ! command -v lua >/dev/null 2>&1; then
+            sudo ln -sf /usr/bin/lua5.3 /usr/local/bin/lua
+          fi
+          lua -v
+
+      - name: Install Luau CLI
+        run: |
+          set -euo pipefail
+          api_url="https://api.github.com/repos/luau-lang/luau/releases/latest"
+          asset_url="$(curl -fsSL "$api_url" | python3 -c '
+import json, re, sys
+data = json.load(sys.stdin)
+assets = data.get("assets", [])
+patterns = [
+    r"luau.*ubuntu.*\.zip$",
+    r"luau.*linux.*\.zip$",
+    r"luau.*ubuntu.*\.tar\.gz$",
+    r"luau.*linux.*\.tar\.gz$",
+]
+for p in patterns:
+    for a in assets:
+        url = a.get("browser_download_url", "")
+        if re.search(p, url, re.IGNORECASE):
+            print(url)
+            raise SystemExit(0)
+print(f"No matching Linux Luau release asset found. Patterns tried: {patterns}", file=sys.stderr)
+raise SystemExit(1)
+')"
+
+          tmp_dir="$(mktemp -d)"
+          archive="$tmp_dir/luau-archive"
+          extract_dir="$tmp_dir/extract"
+          mkdir -p "$extract_dir"
+          curl -fsSL "$asset_url" -o "$archive"
+
+          if [[ "$asset_url" == *.zip ]]; then
+            sudo apt-get install -y unzip
+            unzip -q "$archive" -d "$extract_dir"
+          else
+            tar -xzf "$archive" -C "$extract_dir"
+          fi
+
+          luau_bin=""
+          while IFS= read -r candidate; do
+            chmod +x "$candidate" || true
+            if "$candidate" --version >/dev/null 2>&1 || "$candidate" -h >/dev/null 2>&1; then
+              luau_bin="$candidate"
+              break
+            fi
+          done < <(find "$extract_dir" -type f -name luau | sort)
+
+          if [ -z "$luau_bin" ]; then
+            echo "Luau binary not found in release asset: $asset_url" >&2
+            exit 1
+          fi
+
+          chmod +x "$luau_bin"
+          sudo install -m 0755 "$luau_bin" /usr/local/bin/luau
+          luau --version || luau -h >/dev/null
