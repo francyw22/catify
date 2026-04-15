@@ -1224,12 +1224,26 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     -- Anti-environmental logger 4: detect Lua-level hooks over critical C builtins.
     -- Roblox-safe: only runs when debug.getinfo exists.
     if math.random(1, 2) == 1 then
-        at_load(string.format("do local _ce=%s;local _d=(type(_ce)=='table' and rawget(_ce,'debug')) or nil;local _gi=_d and rawget(_d,'getinfo');if type(_gi)=='function' then local _chk={tostring,type,pcall,rawget,rawset,string.byte,string.char,table.concat,math.abs};for _,_f in ipairs(_chk) do local _ok,_inf=pcall(_gi,_f);if _ok and type(_inf)=='table' and _inf.what and _inf.what~='C' then error('Catify: env logger detected (hookfn)',0) end end end end", env_expr))
+        local env_hook_check = table.concat({
+            "do local _ce=%s;local _d=(type(_ce)=='table' and rawget(_ce,'debug')) or nil;",
+            "local _gi=_d and rawget(_d,'getinfo');",
+            "if type(_gi)=='function' then local _chk={tostring,type,pcall,rawget,rawset,string.byte,string.char,table.concat,math.abs};",
+            "for _,_f in ipairs(_chk) do local _ok,_inf=pcall(_gi,_f);",
+            "if _ok and type(_inf)=='table' and _inf.what and _inf.what~='C' then error('Catify: env logger detected (hookfn)',0) end end end end",
+        })
+        at_load(string.format(env_hook_check, env_expr))
     end
     -- Anti-environmental logger 5: loader function should remain a native C closure.
     -- Roblox-safe: guarded by debug.getinfo availability.
     if math.random(1, 2) == 1 then
-        at_load(string.format("do local _ce=%s;local _d=(type(_ce)=='table' and rawget(_ce,'debug')) or nil;local _gi=_d and rawget(_d,'getinfo');local _ld=(type(load)=='function' and load) or (type(loadstring)=='function' and loadstring);if type(_gi)=='function' and type(_ld)=='function' then local _ok,_inf=pcall(_gi,_ld);if _ok and type(_inf)=='table' and _inf.what and _inf.what~='C' then error('Catify: env logger detected (loaderhook)',0) end end end", env_expr))
+        local loader_hook_check = table.concat({
+            "do local _ce=%s;local _d=(type(_ce)=='table' and rawget(_ce,'debug')) or nil;",
+            "local _gi=_d and rawget(_d,'getinfo');",
+            "local _ld=(type(load)=='function' and load) or (type(loadstring)=='function' and loadstring);",
+            "if type(_gi)=='function' and type(_ld)=='function' then local _ok,_inf=pcall(_gi,_ld);",
+            "if _ok and type(_inf)=='table' and _inf.what and _inf.what~='C' then error('Catify: env logger detected (loaderhook)',0) end end end",
+        })
+        at_load(string.format(loader_hook_check, env_expr))
     end
 
     -- Watermark: obfuscated ASCII cat watermark (sits in memory, never printed)

@@ -173,6 +173,11 @@ local function junk_reg()
     return 200 + math.random(0, 20)
 end
 
+local function junk_move_self(junk_ops)
+    local r = junk_reg()
+    return make_inst(junk_ops.move, r, r, 0)
+end
+
 --- Build a random single junk instruction using the provided shuffled opcodes.
 ---@param junk_ops table  table with .loadbool, .move, .loadnil shuffled opcodes
 ---@param virtual_ops table|nil  optional list of VM-only no-op opcode ids (47..63)
@@ -184,8 +189,7 @@ local function make_junk_inst(junk_ops, virtual_ops)
         return make_inst(junk_ops.loadbool, junk_reg(), 0, 0)
     elseif choice == 2 then
         -- MOVE R(hi) R(hi)  – copy a high register to itself
-        local r = junk_reg()
-        return make_inst(junk_ops.move, r, r, 0)
+        return junk_move_self(junk_ops)
     elseif choice == 3 then
         -- LOADNIL R(hi) 0
         return make_inst(junk_ops.loadnil, junk_reg(), 0, 0)
@@ -198,8 +202,7 @@ local function make_junk_inst(junk_ops, virtual_ops)
             local vop = virtual_ops[math.random(1, #virtual_ops)]
             return make_inst(vop, junk_reg(), math.random(0, 255), math.random(0, 255))
         end
-        local r = junk_reg()
-        return make_inst(junk_ops.move, r, r, 0)
+        return junk_move_self(junk_ops)
     end
 end
 
