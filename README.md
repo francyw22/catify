@@ -31,6 +31,9 @@ lua catify.lua myscript.lua output.lua
 # Two-pass (VM wrapped inside another VM — much harder to reverse)
 lua catify.lua --passes 2 myscript.lua output.lua
 
+# Tiny Roblox output (runtime loaded remotely via HttpGet)
+lua catify.lua myscript.lua output.lua --roblox
+
 # Run the obfuscated script
 lua output.lua
 ```
@@ -81,6 +84,8 @@ chat command.
 | `CATIFY_TOKEN` | — | Discord bot token (required) |
 | `CATIFY_PREFIX` | `!` | Command prefix |
 | `CATIFY_PASSES` | `1` | Obfuscation passes (1 or 2) |
+| `CATIFY_ROBLOX` | `false` | Enable tiny Roblox HTTP-runtime output mode |
+| `CATIFY_ROBLOX_RUNTIME_URL` | `""` | Optional custom runtime URL for Roblox mode |
 | `CATIFY_MAX_INLINE` | `32768` | Max inline code size in bytes |
 | `CATIFY_MAX_FILE` | `524288` | Max attachment size in bytes |
 
