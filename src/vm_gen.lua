@@ -870,7 +870,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- [43] SETLIST
     LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, fwdmap[43], eA,eB,eC,eBx,eSBx)
     LF("    local _off")
-    LF("    if %s==0 then local _ni=%s[%s];%s=%s+1;_off=%s(_ni,6)*50 else _off=(%s-1)*50 end",
+    LF("    if %s==0 then local _ni=%s[%s];%s=%s+1;_off=(%s(_ni,6)-1)*50 else _off=(%s-1)*50 end",
        eC,eCode,ePc,ePc,ePc,bShr,eC)
     LF("    local %s=%s==0 and %s-%s or %s", eNelem,eB,eTop,eA,eB)
     LF("    for _i=1,%s do %s[%s].v[_off+_i]=%s[%s+_i].v end", eNelem,eRegs,eA,eRegs,eA)
@@ -1165,10 +1165,9 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Anti-keylogger 4: pcall/error uncompromised
     at_load("do local _ok,_r=pcall(function()return true end);if not _ok or _r~=true then error('Catify: keylogger detected (pcall)',0)end end")
 
-    -- Anti-environmental logger 1: detect _G/_ENV monitoring via metamethod proxy
-    if math.random(1, 2) == 1 then
-        at_load("do local _m=getmetatable(_G or _ENV);if type(_m)=='table' then if rawget(_m,'__newindex')~=nil or rawget(_m,'__index')~=nil then error('Catify: env logger detected',0)end end end")
-    end
+    -- Anti-environmental logger 1: intentionally omitted – Roblox's executor
+    -- sandbox legitimately attaches __index to _G, which would cause a false
+    -- positive here and crash the protected script.
 
     -- Anti-environmental logger 2: os library integrity check.
     -- Roblox has os.time and os.clock but NOT os.getenv, so we only check
