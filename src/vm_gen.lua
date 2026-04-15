@@ -306,14 +306,12 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         if mode == 0 then
             return utils.obfuscate_int_deep(n, bXor)
         elseif mode == 1 then
-            return utils.obfuscate_int_deep(n, bXor)
-        elseif mode == 2 then
             return utils.obfuscate_int_triple(n, bXor)
-        elseif mode == 3 then
+        elseif mode == 2 then
             return utils.obfuscate_int_deep(n)
-        elseif mode == 4 then
+        elseif mode == 3 then
             return utils.obfuscate_int_triple(n)
-        elseif mode == 5 then
+        elseif mode == 4 then
             return utils.obfuscate_int(n)
         end
         return utils.obfuscate_int_deep(n, bXor)
