@@ -10,16 +10,17 @@ local Utils = {}
 local ALPHA = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 local ALPHA_LO = "abcdefghijklmnopqrstuvwxyz"
 local IDENTIFIER_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+local UNDERSCORE_PREFIX_CHANCE = 3 -- 1 in 3 identifiers start with "_"
 
 --- Generate a random valid Lua identifier with opaque/non-semantic appearance.
----@param min_len integer? default 8
----@param max_len integer? default 16
+---@param min_len integer|nil Minimum length (default: 8)
+---@param max_len integer|nil Maximum length (default: 16)
 function Utils.rand_name(min_len, max_len)
     min_len = min_len or 8
     max_len = max_len or 16
     local len = math.random(min_len, max_len)
     local buf = {}
-    if math.random(1, 3) == 1 then
+    if math.random(1, UNDERSCORE_PREFIX_CHANCE) == 1 then
         buf[1] = "_"
     else
         local p = math.random(1, #ALPHA_LO)
