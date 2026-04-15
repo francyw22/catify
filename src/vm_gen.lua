@@ -302,7 +302,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Helper: emit an obfuscated integer expression using the runtime bXor function
     -- so no ~ operator appears in the generated output (Luau/Lua 5.1 compatible).
     local function _obfInt(n)
-        local mode = math.random(1, 5)
+        local mode = math.random(0, 5)
         if mode == 1 then
             return utils.obfuscate_int_deep(n, bXor)
         elseif mode == 2 then
@@ -314,6 +314,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         elseif mode == 5 then
             return utils.obfuscate_int(n)
         end
+        return utils.obfuscate_int_deep(n, bXor)
     end
 
     -- ── 3. Compute SHA-256 of the encrypted blob for anti-tamper ─────────────
