@@ -9,7 +9,7 @@ local Utils = {}
 
 local ALPHA = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 local ALPHA_LO = "abcdefghijklmnopqrstuvwxyz"
-local IDENTIFIER_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+local IDENTIFIER_CHARS_REST = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
 local UNDERSCORE_PREFIX_CHANCE = 3 -- 1 in 3 identifiers start with "_"
 
 --- Generate a random valid Lua identifier with opaque/non-semantic appearance.
@@ -27,8 +27,8 @@ function Utils.rand_name(min_len, max_len)
         buf[1] = ALPHA_LO:sub(p, p)
     end
     for i = 2, len do
-        local p = math.random(1, #IDENTIFIER_CHARS)
-        buf[i] = IDENTIFIER_CHARS:sub(p, p)
+        local p = math.random(1, #IDENTIFIER_CHARS_REST)
+        buf[i] = IDENTIFIER_CHARS_REST:sub(p, p)
     end
     return table.concat(buf)
 end
