@@ -121,33 +121,14 @@ end
 
 -- ─── Lua source code builder ───────────────────────────────────────────────────
 
--- Emit a byte-array as a Lua string literal using \NNN escapes (no quotes).
-local function bytes_esc(data)
-    local t = {}
-    for i = 1, #data do t[i] = string.format("\\%d", data:byte(i)) end
-    return table.concat(t)
-end
-
--- Emit the encrypted blob as a chunked table matching the superflow_bytecode
--- style from reference implementations.  Each entry is a \NNN-escaped string
--- of at most CHUNK_SIZE bytes so the output stays readable and mirrors the
--- reference obfuscator's layout.
--- The table name is always the literal "superflow_bytecode" (global, no local)
--- so it matches the reference format exactly.
-local CHUNK_SIZE = 200
-local PAYLOAD_TABLE_NAME = "superflow_bytecode"
-local function emit_payload_table(data)
-    local parts = {}
-    parts[#parts+1] = PAYLOAD_TABLE_NAME .. "={"
-    local i = 1
-    while i <= #data do
-        local chunk = data:sub(i, i + CHUNK_SIZE - 1)
-        if i > 1 then parts[#parts+1] = "," end
-        parts[#parts+1] = '"' .. bytes_esc(chunk) .. '"'
-        i = i + CHUNK_SIZE
-    end
-    parts[#parts+1] = "};"
-    return table.concat(parts)
+-- The payload is Base91-encoded and emitted as a single quoted string literal.
+-- Base91 uses only safe printable ASCII characters, making the output resilient
+-- to any third-party tool that processes or re-encodes the generated Lua file.
+local PAYLOAD_VAR_NAME = "superflow_bytecode"
+local function emit_payload_b91(b91str)
+    -- Assign the base91 string to a global variable (no `local` so it is
+    -- accessible both from outside and inside the do-block).
+    return PAYLOAD_VAR_NAME .. "=" .. string.format("%q", b91str) .. ";"
 end
 
 -- Emit an integer as a Lua numeric literal (optionally obfuscated).
@@ -169,6 +150,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local sxor_byte = math.random(1, 255)     -- per-session string XOR key
     local raw  = serialize_proto(proto, sxor_byte)
     local blob = utils.aes256_ctr(raw, key, nonce)
+    local b91_blob = utils.base91_enc(blob)   -- Base91-encode for safe single-string payload
 
     -- ── 2. Generate random identifiers for all locals ───────────────────────
     -- We need ~80 unique names for VM internals
@@ -472,8 +454,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- ── Header comment (minimal, for compact output) ─────────────────────────
     -- (intentionally omitted for compact output)
 
-    -- ── Chunked \NNN-escaped payload table at the top (emitted before do block) ──
-    src[#src+1] = emit_payload_table(blob) .. "\n"
+    -- ── Base91-encoded payload at the top (emitted before do block) ──────────
+    src[#src+1] = emit_payload_b91(b91_blob) .. "\n"
 
     -- Wrap all VM internals in a do...end block so locals don't pollute global scope
     L("do")
@@ -483,10 +465,10 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("local %s,%s,%s,%s,%s,%s", bXor,bNot,bAnd,bOr,bShl,bShr)
     LF("if type(bit32)=='table' then")
     LF("  %s=bit32.bxor;%s=bit32.bnot;%s=bit32.band;%s=bit32.bor", bXor,bNot,bAnd,bOr)
-    -- bit32.lshift and bit32.rshift were deprecated and may be nil in newer Roblox Luau.
-    -- Fall back to native operators (loaded via load() so the source file stays Luau-parseable).
-    LF("  %s=bit32.lshift or load'return function(a,b)return a<<b end'()", bShl)
-    LF("  %s=bit32.rshift or load'return function(a,b)return a>>b end'()", bShr)
+    -- bit32.lshift and bit32.rshift may be absent in some Roblox Luau builds.
+    -- Fall back to a math-based equivalent using bit32.band (always present).
+    LF("  %s=bit32.lshift or function(a,b) if b>=32 then return 0 end;return bit32.band(a*(2^b),0xFFFFFFFF) end", bShl)
+    LF("  %s=bit32.rshift or function(a,b) if b>=32 then return 0 end;return math.floor(bit32.band(a,0xFFFFFFFF)/(2^b)) end", bShr)
     LF("else")
     LF("  %s=load'return function(a,b)return a~b end'()", bXor)
     LF("  %s=load'return function(a)return ~a end'()", bNot)
@@ -498,10 +480,20 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Junk block at top of do-scope (dead computations, not reachable by any real code path)
     src[#src+1] = junk_block("", math.random(2, 4))
     -- ── Emit payload concatenation helper (decoy wrapper using allocated names) ──
-    LF("local %s=%q", b91Alpha, "catify")
-    LF("local function %s(%s) local %s={} for _i=1,#%s do %s[_i]=%s[_i] end return table.concat(%s) end",
-       b91Dec, b91I, b91Out, b91I, b91Out, b91I, b91Out)
-    -- (b91Tbl, b91V, b91B, b91N_, b91P consume name-pool slots; used as junk locals below)
+    -- ── Real inline Base91 decoder (decodes the payload back to the AES blob) ──
+    LF("local %s=%q", b91Alpha, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,./:;<=>?@[]^_`{|}~\"")
+    LF("local %s={}", b91Tbl)
+    LF("for _i=1,#%s do %s[%s:byte(_i)]=_i-1 end", b91Alpha, b91Tbl, b91Alpha)
+    LF("local function %s(%s)", b91Dec, b91I)
+    LF("  local %s,%s,%s=-1,0,0 local %s={}", b91V, b91B, b91N_, b91Out)
+    LF("  for _i=1,#%s do local %s=%s[%s:byte(_i)]", b91I, b91P, b91Tbl, b91I)
+    LF("    if %s~=nil then if %s<0 then %s=%s", b91P, b91V, b91V, b91P)
+    LF("    else %s=%s+%s*91 %s=%s(%s,%s(%s,%s))", b91V, b91V, b91P, b91B, bOr, b91B, bShl, b91V, b91N_)
+    LF("      if %s(%s,8191)>88 then %s=%s+13 else %s=%s+14 end", bAnd, b91V, b91N_, b91N_, b91N_, b91N_)
+    LF("      repeat %s[#%s+1]=string.char(%s(%s,255)) %s=%s(%s,8) %s=%s-8 until %s<=7", b91Out, b91Out, bAnd, b91B, b91B, bShr, b91B, b91N_, b91N_, b91N_)
+    LF("      %s=-1 end end end", b91V)
+    LF("  if %s>-1 then %s[#%s+1]=string.char(%s(%s(%s,%s(%s,%s)),255)) end", b91V, b91Out, b91Out, bAnd, bOr, b91B, bShl, b91V, b91N_)
+    LF("  return table.concat(%s) end", b91Out)
     src[#src+1] = junk_block("", math.random(1, 2))
     -- ── Emit inline AES-256-CTR decrypt ─────────────────────────────────────
     -- S-box table literal
@@ -570,7 +562,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("  local _rk=%s(_k)", aesKe)
     LF("  local _out={};local _ctr=0;local _pos=1;local _dl=#_d")
     LF("  while _pos<=_dl do")
-    LF("    local _cb=_nn..string.pack('<I4',_ctr)..string.pack('<I4',0)")
+    LF("    local _cb=_nn..string.char(_ctr%%256,(_ctr//256)%%256,(_ctr//65536)%%256,(_ctr//16777216)%%256)..\"\\0\\0\\0\\0\"")
     LF("    local _ks=%s(_cb,_rk)", aesEb)
     LF("    local _bl=math.min(16,_dl-_pos+1)")
     LF("    for _i=1,_bl do _out[#_out+1]=string.char(%s(_d:byte(_pos+_i-1),_ks:byte(_i))) end", bXor)
@@ -1031,17 +1023,20 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("    %s[5]=%s(%s[5]+_e,0xFFFFFFFF);%s[6]=%s(%s[6]+_f,0xFFFFFFFF)", shaH,bAnd,shaH,shaH,bAnd,shaH)
     LF("    %s[7]=%s(%s[7]+_g,0xFFFFFFFF);%s[8]=%s(%s[8]+_hv,0xFFFFFFFF)", shaH,bAnd,shaH,shaH,bAnd,shaH)
     LF("  end")
-    LF("  local _out={};for _i=1,8 do _out[_i]=string.pack('>I4',%s[_i]) end;return table.concat(_out)", shaH)
+    LF("  local _out={};for _i=1,8 do local _w=%s[_i];_out[_i]=string.char(_w//16777216,(_w//65536)%%256,(_w//256)%%256,_w%%256) end;return table.concat(_out)", shaH)
     LF("end")
-    -- Decode payload table into vBlob (simple concatenation of \NNN-escaped chunks)
-    LF("local %s=table.concat(%s)", vBlob, PAYLOAD_TABLE_NAME)
-    LF("%s=nil", PAYLOAD_TABLE_NAME)   -- wipe payload table after reading
+    -- Decode Base91 payload into vBlob (binary AES-encrypted blob)
+    LF("local %s=%s(%s)", vBlob, b91Dec, PAYLOAD_VAR_NAME)
+    LF("%s=nil", PAYLOAD_VAR_NAME)   -- wipe payload after decoding
     -- SHA-256 integrity check: compute hash and compare 8 words
     LF("local %s=%s(%s)", atSha, shaFn, vBlob)
     local sha_checks = {}
     for i = 0, 7 do
         local word_exp = _obfInt(blob_sha_words[i])
-        sha_checks[i+1] = string.format("(string.unpack('>I4',%s,%d)~=%s)", atSha, i*4+1, word_exp)
+        local off = i * 4 + 1
+        -- Extract big-endian uint32 via arithmetic (no string.unpack needed)
+        sha_checks[i+1] = string.format("(%s:byte(%d)*16777216+%s:byte(%d)*65536+%s:byte(%d)*256+%s:byte(%d)~=%s)",
+            atSha, off, atSha, off+1, atSha, off+2, atSha, off+3, word_exp)
     end
     -- Obfuscate the integrity-check error message so it doesn't appear as plaintext.
     do
@@ -1067,7 +1062,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Each anti-tamper check is stored as XOR-encoded bytes; this helper
     -- decodes them at runtime and executes them via load() so that none of
     -- the check logic (error strings, API names) appears as readable text.
-    LF("local function %s(_e,_m) local _t={} for _i=1,#_e do _t[_i]=string.char(%s(_e:byte(_i),_m)) end load(table.concat(_t))() end", vAtExec, bXor)
+    LF("local function %s(_e,_m) if type(load)~='function' then return end local _t={} for _i=1,#_e do _t[_i]=string.char(%s(_e:byte(_i),_m)) end local _f=load(table.concat(_t));if _f then _f() end end", vAtExec, bXor)
 
     -- Lua-level helper: XOR-encode `code_str` with a random byte mask and
     -- emit a call to vAtExec(encoded_string, mask) into the generated source.
