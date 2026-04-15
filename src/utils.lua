@@ -9,11 +9,11 @@ local Utils = {}
 
 local ALPHA = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 local ALPHA_LO = "abcdefghijklmnopqrstuvwxyz"
-local ALNUM = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+local IDENTIFIER_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
 
 --- Generate a random valid Lua identifier with opaque/non-semantic appearance.
----@param min_len integer?
----@param max_len integer?
+---@param min_len integer? default 8
+---@param max_len integer? default 16
 function Utils.rand_name(min_len, max_len)
     min_len = min_len or 8
     max_len = max_len or 16
@@ -26,8 +26,8 @@ function Utils.rand_name(min_len, max_len)
         buf[1] = ALPHA_LO:sub(p, p)
     end
     for i = 2, len do
-        local p = math.random(1, #ALNUM)
-        buf[i] = ALNUM:sub(p, p)
+        local p = math.random(1, #IDENTIFIER_CHARS)
+        buf[i] = IDENTIFIER_CHARS:sub(p, p)
     end
     return table.concat(buf)
 end
