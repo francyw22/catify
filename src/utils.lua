@@ -276,12 +276,13 @@ function Utils.obfuscate_int_deep(n, xorname)
             local c = math.random(0, 0x3FFFFFFF)
             local d = math.random(0, 0x3FFFFFFF)
             return string.format("(%s(%s(%d,%d),%s(%s(%d,%d),%s(%d,%d))))", xorname, xorname, a, b, xorname, xorname, c, d, xorname, c, d)
-        else
+        elseif form == 7 then
             -- Extra arithmetic shell with nested no-op XOR.
             local p = math.random(1, 0x3FFF)
             local q = math.random(0, 0x3FFFFFFF)
             return string.format("((%s(%d,%d))+(%s(%d,%d))+%d-%d)", xorname, a, b, xorname, q, q, p, p)
         end
+        return string.format("(%s(%d,%d))", xorname, a, b)
     else
         -- No xorname: pre-compute XOR and use arithmetic-only noise
         local result = n  -- a ~ b == n
@@ -304,11 +305,12 @@ function Utils.obfuscate_int_deep(n, xorname)
         elseif form == 6 then
             local p = math.random(1, 0x1FFF)
             return string.format("((%d+%d)-%d)", result, p, p)
-        else
+        elseif form == 7 then
             local p = math.random(1, 0x3FFF)
             local q = math.random(1, 0x3FFF)
             return string.format("((%d-%d)+(%d+%d-%d))", result, p, p, q, q)
         end
+        return tostring(result)
     end
 end
 

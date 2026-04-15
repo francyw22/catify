@@ -313,8 +313,10 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
             return utils.obfuscate_int_triple(n)
         elseif mode == 4 then
             return utils.obfuscate_int(n)
+        elseif mode == 5 then
+            return utils.obfuscate_int_deep(n, bXor)
         end
-        return utils.obfuscate_int_deep(n, bXor)
+        return tostring(n)
     end
 
     -- ── 3. Compute SHA-256 of the encrypted blob for anti-tamper ─────────────
