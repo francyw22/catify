@@ -272,10 +272,10 @@ function Utils.obfuscate_int_deep(n, xorname)
             local p = math.random(0, 0x3FFFFFFF)
             return string.format("(%s(%s(%d,%d),%s(%d,%d)))", xorname, xorname, a, b, xorname, p, p)
         elseif form == 6 then
-            -- Independent split + combine: xor(xor(a,b), xor(c,d))
+            -- Independent split + combine with explicit cancelled sub-tree.
             local c = math.random(0, 0x3FFFFFFF)
-            local d = c
-            return string.format("(%s(%s(%d,%d),%s(%d,%d)))", xorname, xorname, a, b, xorname, c, d)
+            local d = math.random(0, 0x3FFFFFFF)
+            return string.format("(%s(%s(%d,%d),%s(%s(%d,%d),%s(%d,%d))))", xorname, xorname, a, b, xorname, xorname, c, d, xorname, c, d)
         else
             -- Extra arithmetic shell with nested no-op XOR.
             local p = math.random(1, 0x3FFF)
