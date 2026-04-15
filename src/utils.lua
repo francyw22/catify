@@ -141,7 +141,7 @@ end
 function Utils.to_escape(data)
     local out = {}
     for i = 1, #data do
-        out[i] = string.format("\\%d", data:byte(i))
+        out[i] = string.format("\\%03d", data:byte(i))
     end
     return table.concat(out)
 end
