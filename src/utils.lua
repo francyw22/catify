@@ -7,59 +7,22 @@ local Utils = {}
 
 -- ─── Random identifiers ──────────────────────────────────────────────────────
 
-local ALPHA = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-local ALPHA_LO = "abcdefghijklmnopqrstuvwxyz"
-
--- Word parts used for human-style camelCase / compound names.
--- Enough variety to produce >5000 unique combinations without collision.
-local _NAME_A = {
-    "get","set","has","run","load","save","make","check","read","find",
-    "calc","init","push","pull","put","add","try","use","raw","cur",
-    "next","last","base","open","send","recv","emit","bind","wrap","cast",
-}
-local _NAME_B = {
-    "Val","Buf","Len","Idx","Ref","Data","State","Count","Flag","Key",
-    "Hash","Map","List","Node","Item","Base","Type","Mode","Step","Size",
-    "Cap","Pos","Off","Src","Dst","Out","Ret","Tag","Ptr","Slot",
-}
-
---- Generate a single random valid Lua identifier with human-like appearance.
---- Three styles are chosen randomly each call:
----   1) camelCase  – e.g. "getState", "loadKey3"
----   2) compound   – e.g. "bufLen", "srcPos7"
----   3) alpha-only – e.g. "mxrptv" (fallback, guarantees uniqueness)
----@param min_len integer  ignored for styles 1-2, used for style 3
----@param max_len integer  ignored for styles 1-2, used for style 3
+--- Generate a random valid Lua identifier in binary-like style.
+--- Example output: "_001010101"
+---@param min_len integer?  minimum number of binary digits
+---@param max_len integer?  maximum number of binary digits
 function Utils.rand_name(min_len, max_len)
-    local style = math.random(1, 3)
-    if style == 1 then
-        -- camelCase: verb + Noun, optional trailing digit
-        local s = _NAME_A[math.random(1, #_NAME_A)] .. _NAME_B[math.random(1, #_NAME_B)]
-        if math.random(1, 4) == 1 then s = s .. math.random(2, 9) end
-        return s
-    elseif style == 2 then
-        -- compound lower: two short words, second capitalised, optional digit
-        local a = _NAME_A[math.random(1, #_NAME_A)]
-        local b = _NAME_B[math.random(1, #_NAME_B)]:lower()
-        local s = a .. b:sub(1,1):upper() .. b:sub(2)
-        if math.random(1, 5) == 1 then s = s .. math.random(2, 9) end
-        return s
-    else
-        -- Pure alpha, no digits mid-name; letters only, occasional digit suffix.
-        min_len = min_len or 4
-        max_len = max_len or 9
-        local len = math.random(min_len, max_len)
-        local buf = {}
-        local p0 = math.random(1, #ALPHA_LO)
-        buf[1] = ALPHA_LO:sub(p0, p0)
-        for i = 2, len do
-            local p = math.random(1, #ALPHA)
-            buf[i] = ALPHA:sub(p, p)
-        end
-        -- Rare trailing digit (not mid-name)
-        if math.random(1, 6) == 1 then buf[len + 1] = tostring(math.random(2, 9)) end
-        return table.concat(buf)
+    min_len = min_len or 8
+    max_len = max_len or 16
+    if min_len < 1 then min_len = 1 end
+    if max_len < min_len then max_len = min_len end
+
+    local len = math.random(min_len, max_len)
+    local buf = { "_" }
+    for i = 1, len do
+        buf[#buf + 1] = (math.random(0, 1) == 1) and "1" or "0"
     end
+    return table.concat(buf)
 end
 
 --- Generate `count` unique random identifiers (no collisions)
