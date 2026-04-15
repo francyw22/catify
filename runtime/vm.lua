@@ -1,6 +1,5 @@
 --[[
     Catify Runtime VM
-    https://github.com/francyw22/catify
 
     Static, parameterized Lua 5.3 / Roblox Luau VM interpreter.
     Load via HTTP and call the returned function:
