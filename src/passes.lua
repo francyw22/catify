@@ -218,9 +218,13 @@ function Passes.inject_junk(proto, opmap, count)
         loadnil  = opmap and (opmap[4] or 4) or 4,   -- LOADNIL
     }
 
+    -- Real opcode ids used by safety checks.
+    local OP_LOADBOOL = 3
+    local OP_LOADKX   = 2
+    local OP_SETLIST  = 43
     -- Real opcodes that conditionally skip the next instruction.
     -- EQ/LT/LE/TEST/TESTSET skip over a JMP; LOADBOOL (C!=0) skips the next op.
-    local COND_SKIP = { [3]=true, [31]=true, [32]=true, [33]=true, [34]=true, [35]=true }
+    local COND_SKIP = { [OP_LOADBOOL]=true, [31]=true, [32]=true, [33]=true, [34]=true, [35]=true }
     -- Real opcodes that carry a relative sBx jump offset
     local JUMP_OPS  = { [30]=true, [39]=true, [40]=true, [42]=true }
 
@@ -237,12 +241,12 @@ function Passes.inject_junk(proto, opmap, count)
             local c = (inst >> 14) & 0x1FF
             if COND_SKIP[rop] then
                 -- LOADBOOL only skips when C!=0.
-                if rop ~= 3 or c ~= 0 then
+                if rop ~= OP_LOADBOOL or c ~= 0 then
                     protected[i + 1] = true
                 end
             end
             -- LOADKX and SETLIST(C==0) consume the next EXTRAARG instruction.
-            if rop == 2 or (rop == 43 and c == 0) then
+            if rop == OP_LOADKX or (rop == OP_SETLIST and c == 0) then
                 protected[i + 1] = true
             end
         end
