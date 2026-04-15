@@ -136,13 +136,14 @@ end
 -- ─── Byte-string serialization helpers ───────────────────────────────────────
 
 --- Encode a byte string as a Lua \NNN escape string (no quotes).
---- Uses minimal-length decimal escapes (\N, \NN, or \NNN) matching Luarmor output style.
+--- Uses fixed-width 3-digit decimal escapes to avoid parser ambiguity when
+--- adjacent escapes start with digits.
 ---@param data string
 ---@return string
 function Utils.to_escape(data)
     local out = {}
     for i = 1, #data do
-        out[i] = string.format("\\%d", data:byte(i))
+        out[i] = string.format("\\%03d", data:byte(i))
     end
     return table.concat(out)
 end

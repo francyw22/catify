@@ -1668,16 +1668,18 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     -- Some Roblox environment loggers hook tostring() and return a fixed/collapsed
     -- address for every table, making two distinct tables stringify identically.
     -- In a legitimate runtime, distinct tables always have distinct addresses.
-    -- The sub(8,15) slice isolates just the hex-address segment, which is more
-    -- robust against prefixes that vary by platform (e.g. "table: 0x" vs "table: ").
+    -- Compare the LAST 8 characters (low-order hex digits) which always differ
+    -- between consecutively allocated tables, avoiding false positives from
+    -- shared high-order bits while still catching loggers that return a fixed
+    -- address for every table.
     -- On detection: a randomly chosen deterrent message is printed (wrapped in pcall
     -- so even a broken print cannot prevent the error), then execution is aborted.
     -- tick() is Roblox-specific; the fallback to os.time keeps this standard-Lua-safe.
     at_load(table.concat({
         "do",
-        "local _t1=tostring({});local _t2=tostring({});",
-        "local _a1=string.sub(_t1,8,15);local _a2=string.sub(_t2,8,15);",
-        "if _a1==_a2 then",
+        " local _t1=tostring({});local _t2=tostring({});",
+        "local _a1=string.sub(_t1,-8);local _a2=string.sub(_t2,-8);",
+        "if _a1==_a2 then ",
         "pcall(function()",
         "local _ts=(type(tick)=='function' and tick())",
         "or (type(os)=='table' and type(os.time)=='function' and os.time()) or 0;",
