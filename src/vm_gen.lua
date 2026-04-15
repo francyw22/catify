@@ -139,14 +139,16 @@ end
 -- ─── VM Lua template (generated with random names at call time) ────────────────
 
 --- Generate the complete obfuscated Lua source for the given proto.
----@param proto   table   Top-level proto (opcodes already shuffled in .code arrays)
----@param revmap  table   revmap[shuffled_op] = real_op  (0-indexed)
----@param key     string  AES-256 key (32 bytes) used to encrypt the bytecode blob
----@param nonce   string  AES-256-CTR nonce (8 bytes)
----@param utils   table   The Utils module (for aes256_ctr, sha256, to_escape, rand_names)
----@param vm_meta table|nil Optional VM metadata ({ virtual_ops = {...} })
+---@param proto    table      Top-level proto (opcodes already shuffled in .code arrays)
+---@param revmap   table      revmap[shuffled_op] = real_op  (0-indexed)
+---@param key      string     AES-256 key (32 bytes) used to encrypt the bytecode blob
+---@param nonce    string     AES-256-CTR nonce (8 bytes)
+---@param utils    table      The Utils module (for aes256_ctr, sha256, to_escape, rand_names)
+---@param vm_meta  table|nil  Optional VM metadata ({ virtual_ops = {...} })
+---@param http_url string|nil When set, emit a tiny HTTP-loader output instead of an embedded VM.
+---                           The URL must point to a hosted copy of runtime/vm.lua.
 ---@return string  Lua source
-function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
+function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     -- ── 1. Serialize + encrypt the custom bytecode ───────────────────────────
     local sxor_byte = math.random(1, 255)     -- per-session string XOR key
     local raw  = serialize_proto(proto, sxor_byte)
@@ -309,6 +311,99 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     for i = 0, 7 do
         blob_sha_words[i] = string.unpack(">I4", blob_sha, i*4+1)
     end
+
+    -- ── HTTP-runtime mode: emit tiny output (payload + config + loader) ───────
+    -- When http_url is provided the full VM is NOT embedded.  Instead we emit:
+    --   1. The encrypted payload table (small — just the user's bytecode).
+    --   2. A config table with the per-run keys, nonces, SHA words, and revmap.
+    --   3. A one-liner that fetches runtime/vm.lua from the given URL and calls it.
+    if http_url then
+        local out = {}
+        local function H(s) out[#out+1] = s .. "\n" end
+        local function HF(fmt, ...) H(string.format(fmt, ...)) end
+
+        -- Watermark header
+        H("--[[")
+        H("        Catify -- Lua script protector.")
+        H(" this code runs & decrypts & executes protected Lua scripts")
+        H("        https://github.com/francyw22/catify")
+        H("]]")
+
+        -- Payload table (encrypted bytecode chunks, same format as full mode)
+        local payload_var = utils.rand_name(4, 8)
+        out[#out+1] = "local " .. payload_var .. "={" .. table.concat(blob_chunks, ",") .. "}\n"
+
+        -- Config table: key/nonce split into XOR-masked chunks for obfuscation,
+        -- sha-256 integrity words, sxor byte, and shuffled→real opcode revmap.
+        local cfg_var = utils.rand_name(4, 8)
+
+        -- Key: 4 chunks of 8 bytes, each pre-XOR'd with a random per-chunk mask.
+        local km = { math.random(1,255), math.random(1,255), math.random(1,255), math.random(1,255) }
+        local key_parts = {}
+        for chunk = 0, 3 do
+            local t = {}
+            for bi = 1, 8 do
+                t[bi] = tostring(key:byte(chunk*8 + bi) ~ km[chunk+1])
+            end
+            key_parts[chunk+1] = string.format("string.char(%s)", table.concat(t, ","))
+        end
+        -- Nonce: 2 chunks of 4 bytes.
+        local nm = { math.random(1,255), math.random(1,255) }
+        local nonce_parts = {}
+        for chunk = 0, 1 do
+            local t = {}
+            for bi = 1, 4 do
+                t[bi] = tostring(nonce:byte(chunk*4 + bi) ~ nm[chunk+1])
+            end
+            nonce_parts[chunk+1] = string.format("string.char(%s)", table.concat(t, ","))
+        end
+
+        -- SHA-256 expected words
+        local sha_entries = {}
+        for i = 0, 7 do sha_entries[i+1] = tostring(blob_sha_words[i]) end
+
+        -- Revmap: 47 entries (shuffled 0..46 → real op).
+        local rm_entries = {}
+        for shuffled = 0, 46 do
+            rm_entries[shuffled+1] = tostring(revmap[shuffled] or 0)
+        end
+
+        -- Emit config table
+        HF("local %s={", cfg_var)
+        -- Reconstructed key: unmask chunks at runtime
+        HF("  key=(function()")
+        HF("    local _t={}")
+        for chunk = 0, 3 do
+            HF("    local _m=%d;for _j=1,8 do _t[%d+_j]=string.char((%s):byte(_j)~_m)end",
+               km[chunk+1], chunk*8, key_parts[chunk+1])
+        end
+        HF("    return table.concat(_t)")
+        HF("  end)(),")
+        -- Reconstructed nonce
+        HF("  nonce=(function()")
+        HF("    local _t={}")
+        for chunk = 0, 1 do
+            HF("    local _m=%d;for _j=1,4 do _t[%d+_j]=string.char((%s):byte(_j)~_m)end",
+               nm[chunk+1], chunk*4, nonce_parts[chunk+1])
+        end
+        HF("    return table.concat(_t)")
+        HF("  end)(),")
+        HF("  sxor=%d,", sxor_byte)
+        HF("  sha={[0]=%s},", table.concat(sha_entries, ","))
+        HF("  revmap={[0]=%s},", table.concat(rm_entries, ","))
+        H("}")
+
+        -- HTTP loader (Roblox game:HttpGet)
+        local rt_var = utils.rand_name(4, 8)
+        HF("local %s=pcall(function()", rt_var)
+        HF("  local _f=loadstring(game:HttpGet(%q,true))", http_url)
+        HF("  if type(_f)=='function' then _f()(%s,table.concat(%s)) end", cfg_var, payload_var)
+        H("end)")
+        HF("if not %s then error('Catify: failed to load runtime - ensure HTTP is enabled in game settings',0) end", rt_var)
+
+        return table.concat(out)
+    end
+    -- ── End HTTP-runtime mode ─────────────────────────────────────────────────
 
     -- ── 4. Build the fwdmap (real opcode → shuffled opcode) ─────────────────
     -- The dispatch table will be indexed by shuffled opcodes so that the
