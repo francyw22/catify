@@ -868,10 +868,15 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("  end")
     src[#src+1] = junk_block("  ", 1)
     -- [43] SETLIST
+    -- LFIELDS_PER_FLUSH = 50 (matches Lua 5.3 lvm.c constant).
+    -- When C==0 the block number is in the next EXTRAARG instruction's Ax field.
+    -- Offset is (block_number - 1) * SETLIST_BATCH, consistent with the C!=0
+    -- path: (C-1)*SETLIST_BATCH.
+    local SETLIST_BATCH = 50
     LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, fwdmap[43], eA,eB,eC,eBx,eSBx)
     LF("    local _off")
-    LF("    if %s==0 then local _ni=%s[%s];%s=%s+1;_off=(%s(_ni,6)-1)*50 else _off=(%s-1)*50 end",
-       eC,eCode,ePc,ePc,ePc,bShr,eC)
+    LF("    if %s==0 then local _ni=%s[%s];%s=%s+1;_off=(%s(_ni,6)-1)*%d else _off=(%s-1)*%d end",
+       eC,eCode,ePc,ePc,ePc,bShr,SETLIST_BATCH,eC,SETLIST_BATCH)
     LF("    local %s=%s==0 and %s-%s or %s", eNelem,eB,eTop,eA,eB)
     LF("    for _i=1,%s do %s[%s].v[_off+_i]=%s[%s+_i].v end", eNelem,eRegs,eA,eRegs,eA)
     LF("  end")
