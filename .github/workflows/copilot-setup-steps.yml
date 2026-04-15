@@ -62,11 +62,20 @@ raise SystemExit(1)
             tar -xzf "$archive" -C "$extract_dir"
           fi
 
-          luau_bin="$(find "$extract_dir" -type f -name luau | head -n1)"
+          luau_bin=""
+          while IFS= read -r candidate; do
+            chmod +x "$candidate" || true
+            if "$candidate" --version >/dev/null 2>&1 || "$candidate" -h >/dev/null 2>&1; then
+              luau_bin="$candidate"
+              break
+            fi
+          done < <(find "$extract_dir" -type f -name luau | sort)
+
           if [ -z "$luau_bin" ]; then
             echo "Luau binary not found in release asset: $asset_url" >&2
             exit 1
           fi
 
+          chmod +x "$luau_bin"
           sudo install -m 0755 "$luau_bin" /usr/local/bin/luau
           luau --version || luau -h >/dev/null
