@@ -7,7 +7,7 @@
          custom binary format.
       2. Encrypt that blob with AES-256-CTR (32-byte key + 8-byte nonce supplied by the caller).
       3. Emit a self-contained Lua 5.3 source file that:
-           • Decodes Base91 payload, checks SHA-256 integrity, decrypts with AES-256-CTR.
+           • Loads \NNN-escaped payload, checks SHA-256 integrity, decrypts with AES-256-CTR.
            • Runs a complete Lua 5.3 virtual machine implementing all 47 opcodes.
            • Uses shuffled opcode numbers, random local-variable names, and a
              state-machine dispatch loop for control-flow obfuscation.
@@ -124,14 +124,12 @@ end
 
 -- ─── Lua source code builder ───────────────────────────────────────────────────
 
--- The payload is Base91-encoded and emitted as a single quoted string literal.
--- Base91 uses only safe printable ASCII characters, making the output resilient
--- to any third-party tool that processes or re-encodes the generated Lua file.
+-- The payload is emitted as a single quoted Lua \NNN-escaped string literal.
 local PAYLOAD_VAR_NAME = "superflow_bytecode"
-local function emit_payload_b91(b91str)
-    -- Assign the base91 string to a global variable (no `local` so it is
+local function emit_payload_esc(escaped)
+    -- Assign the escaped blob to a global variable (no `local` so it is
     -- accessible both from outside and inside the do-block).
-    return PAYLOAD_VAR_NAME .. "=" .. string.format("%q", b91str) .. ";"
+    return PAYLOAD_VAR_NAME .. "=\"" .. escaped .. "\";"
 end
 
 -- Emit an integer as a Lua numeric literal (optionally obfuscated).
@@ -146,7 +144,7 @@ end
 ---@param revmap  table   revmap[shuffled_op] = real_op  (0-indexed)
 ---@param key     string  AES-256 key (32 bytes) used to encrypt the bytecode blob
 ---@param nonce   string  AES-256-CTR nonce (8 bytes)
----@param utils   table   The Utils module (for aes256_ctr, sha256, base91_enc, rand_names)
+---@param utils   table   The Utils module (for aes256_ctr, sha256, to_escape, rand_names)
 ---@param vm_meta table|nil Optional VM metadata ({ virtual_ops = {...} })
 ---@return string  Lua source
 function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
@@ -154,7 +152,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     local sxor_byte = math.random(1, 255)     -- per-session string XOR key
     local raw  = serialize_proto(proto, sxor_byte)
     local blob = utils.aes256_ctr(raw, key, nonce)
-    local b91_blob = utils.base91_enc(blob)   -- Base91-encode for safe single-string payload
+    local esc_blob = utils.to_escape(blob)    -- \NNN-escape for direct Lua string payload
 
     -- ── 2. Generate random identifiers for all locals ───────────────────────
     -- We need ~80 unique names for VM internals
@@ -194,17 +192,6 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     local shaK      = vn()   -- K constants table name (unused var, kept for naming pool)
     local shaH      = vn()   -- hash state name
     local shaW      = vn()   -- message schedule name
-    -- Base91 inline decoder variables
-    local b91Alpha  = vn()   -- alphabet string variable
-    local b91Dec    = vn()   -- decoder function name
-    local b91Tbl    = vn()   -- lookup table name
-    local b91V      = vn()   -- v variable
-    local b91B      = vn()   -- b variable
-    local b91N_     = vn()   -- n variable (trailing _ to avoid clash with Lua keyword)
-    local b91Out    = vn()   -- output table
-    local b91P      = vn()   -- p (decoded value) variable
-    local b91I      = vn()   -- input parameter name
-
     -- Execute function params/locals
     local eProto    = vn()
     local eUpvals   = vn()
@@ -581,8 +568,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     -- ── Header comment (minimal, for compact output) ─────────────────────────
     -- (intentionally omitted for compact output)
 
-    -- ── Base91-encoded payload at the top (emitted before do block) ──────────
-    src[#src+1] = emit_payload_b91(b91_blob) .. "\n"
+    -- ── \NNN-escaped payload at the top (emitted before do block) ────────────
+    src[#src+1] = emit_payload_esc(esc_blob) .. "\n"
 
     -- Wrap all VM internals in a do...end block so locals don't pollute global scope
     L("do")
@@ -629,21 +616,6 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     LF("local function %s(_v) return string.char(%s(%s(_v,24),255),%s(%s(_v,16),255),%s(%s(_v,8),255),%s(_v,255)) end", wrU4be, bAnd, bShr, bAnd, bShr, bAnd, bShr, bAnd)
     -- Junk block at top of do-scope (dead computations, not reachable by any real code path)
     src[#src+1] = junk_block("", math.random(4, 8))
-    -- ── Emit payload concatenation helper (decoy wrapper using allocated names) ──
-    -- ── Real inline Base91 decoder (decodes the payload back to the AES blob) ──
-    LF("local %s=%q", b91Alpha, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,./:;<=>?@[]^_`{|}~\"")
-    LF("local %s={}", b91Tbl)
-    LF("for _i=1,#%s do %s[%s:byte(_i)]=_i-1 end", b91Alpha, b91Tbl, b91Alpha)
-    LF("local function %s(%s)", b91Dec, b91I)
-    LF("  local %s,%s,%s=-1,0,0 local %s={}", b91V, b91B, b91N_, b91Out)
-    LF("  for _i=1,#%s do local %s=%s[%s:byte(_i)]", b91I, b91P, b91Tbl, b91I)
-    LF("    if %s~=nil then if %s<0 then %s=%s", b91P, b91V, b91V, b91P)
-    LF("    else %s=%s+%s*91 %s=%s(%s,%s(%s,%s))", b91V, b91V, b91P, b91B, bOr, b91B, bShl, b91V, b91N_)
-    LF("      if %s(%s,8191)>88 then %s=%s+13 else %s=%s+14 end", bAnd, b91V, b91N_, b91N_, b91N_, b91N_)
-    LF("      repeat %s[#%s+1]=string.char(%s(%s,255)) %s=%s(%s,8) %s=%s-8 until %s<=7", b91Out, b91Out, bAnd, b91B, b91B, bShr, b91B, b91N_, b91N_, b91N_)
-    LF("      %s=-1 end end end", b91V)
-    LF("  if %s>-1 then %s[#%s+1]=string.char(%s(%s(%s,%s(%s,%s)),255)) end", b91V, b91Out, b91Out, bAnd, bOr, b91B, bShl, b91V, b91N_)
-    LF("  return table.concat(%s) end", b91Out)
     src[#src+1] = junk_block("", math.random(2, 4))
     -- ── Emit inline AES-256-CTR decrypt ─────────────────────────────────────
     -- S-box table literal
@@ -1188,8 +1160,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     LF("  end")
     LF("  local _out={};for _i=1,8 do local _w=%s[_i];_out[_i]=string.char(_w//16777216,(_w//65536)%%256,(_w//256)%%256,_w%%256) end;return table.concat(_out)", shaH)
     LF("end")
-    -- Decode Base91 payload into vBlob (binary AES-encrypted blob)
-    LF("local %s=%s(%s)", vBlob, b91Dec, PAYLOAD_VAR_NAME)
+    -- Read escaped payload directly into vBlob (binary AES-encrypted blob)
+    LF("local %s=%s", vBlob, PAYLOAD_VAR_NAME)
     LF("%s=nil", PAYLOAD_VAR_NAME)   -- wipe payload after decoding
     -- SHA-256 integrity check: compute hash and compare 8 words
     LF("local %s=%s(%s)", atSha, shaFn, vBlob)

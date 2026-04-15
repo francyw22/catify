@@ -12,7 +12,7 @@ heavily protected VM bytecode — matching the `superflow_bytecode` format used 
 | **Custom VM** | Full Lua 5.3 VM in generated source; all 47 opcodes + virtual decoy opcodes |
 | **Opcode shuffle** | Real opcode numbers replaced by random shuffled IDs per output |
 | **AES-256-CTR encryption** | Bytecode payload encrypted with a fresh 32-byte key + 8-byte nonce per run |
-| **Base91 payload** | Encrypted blob encoded as a single compact Base91 string (`superflow_bytecode`) |
+| **`\NNN` payload escapes** | Encrypted blob emitted as a Lua `\NNN` escaped string (`superflow_bytecode`) |
 | **SHA-256 integrity** | Runtime SHA-256 check on the encrypted blob (8 obfuscated word comparisons) |
 | **Anti-keylogger checks** | Runtime checks for debug hook, io library, string metatable, pcall integrity |
 | **Debug-hook detection** | Detects `debug.sethook` / `debug.getinfo` usage at runtime |
@@ -91,10 +91,8 @@ chat command.
 The generated file looks like:
 
 ```lua
-superflow_bytecode="ABCDEFGHIJKLMNOPQRSTUVWXYZab..." -- Base91-encoded encrypted payload
+superflow_bytecode="\123\034\255..." -- \NNN-escaped encrypted payload
 do
-local <b91_alpha>="ABCDEFGHIJKLMNOPQRSTUVWXYZabc..."
-local function <b91_dec>(...) ... end   -- Base91 decoder
 local <aes_sbox>={[0]=99,124,...}       -- AES S-box
 local function <aes_xtime>(...) ... end
 local function <aes_key_expand>(...) ... end
@@ -115,7 +113,7 @@ src/
   parser.lua        – Lua 5.3 bytecode parser
   passes.lua        – Obfuscation passes (opcode shuffle, junk injection…)
   vm_gen.lua        – VM source code generator
-  utils.lua         – AES-256-CTR, SHA-256, Base91, CRC-32, random name generator
+  utils.lua         – AES-256-CTR, SHA-256, byte escaping, CRC-32, random name generator
 bot/
   discord_bot.js    – discord.js (Node.js) Discord bot
   package.json      – Node.js dependencies
