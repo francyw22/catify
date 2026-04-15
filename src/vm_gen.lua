@@ -397,10 +397,13 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
         HF("  return table.concat(_o)")
         H("end")
 
+        -- Luau-safe XOR helper (avoids native `~` bitwise operator in generated code).
+        H("local function _bx(_a,_b) local _r,_p=0,1 while _a>0 or _b>0 do local _x,_y=_a%2,_b%2 if _x~=_y then _r=_r+_p end _a=(_a-_x)/2 _b=(_b-_y)/2 _p=_p*2 end return _r end")
+
         -- XOR field-name decoder: _sk(encoded_bytes, mask) → plain string.
         -- Used to reconstruct "key","nonce","sxor","sha","revmap" at runtime
         -- without those literal strings appearing anywhere in the generated code.
-        H("local function _sk(_x,_m) local _t={} for _i=1,#_x do _t[_i]=string.char(_x:byte(_i)~_m) end return table.concat(_t) end")
+        H("local function _sk(_x,_m) local _t={} for _i=1,#_x do _t[_i]=string.char(_bx(_x:byte(_i),_m)) end return table.concat(_t) end")
 
         -- ── Emit config table via polymorphic field-assignment patterns ────────
         -- The cfg table fields (key, nonce, sxor, sha, revmap) are set using
@@ -577,7 +580,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
         HF("  local _u=(function()")
         HF("    local _ut={}")
         for idx = 1, #url_chunks do
-            HF("    do local _m=%d; local _c=%s; for _j=1,#_c do _ut[#_ut+1]=string.char(_c:byte(_j)~_m) end end",
+            HF("    do local _m=%d; local _c=%s; for _j=1,#_c do _ut[#_ut+1]=string.char(_bx(_c:byte(_j),_m)) end end",
                 url_masks[idx], url_chunks[idx])
         end
         HF("    return table.concat(_ut)")
@@ -587,7 +590,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
         HF("    local _sx=0")
         HF("    for _i=1,17 do")
         HF("      _jn[_i]=((_i*37)+13)%%256")
-        HF("      _sx=(_sx+(_jn[_i]~(_i*11)))%%65536")
+        HF("      _sx=(_sx+_bx(_jn[_i],(_i*11)))%%65536")
         HF("    end")
         HF("    if _sx==65537 then error('Catify: invalid runtime probe',0) end")
         HF("  end")
