@@ -470,11 +470,13 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     L("local _=tostring;local __=type;local ___=pcall")
     LF("local %s=(type(load)=='function' and load) or (type(loadstring)=='function' and loadstring) or nil", vLoadCompat)
     LF("local %s=(table and table.pack) or function(...) return {n=select('#', ...),...} end", vPack)
-    LF("local %s=((table and table.unpack) or unpack)", vUnpack)
+    LF("local %s=(table and table.unpack) or unpack", vUnpack)
+    LF("if type(%s)~='function' then local function _up(t,i,j) i=i or 1;j=j or #t;if i>j then return end;return t[i],_up(t,i+1,j) end;%s=_up end", vUnpack, vUnpack)
     -- Bitwise compat: use bit32 library if available (Roblox Luau), otherwise
     -- compile native Lua 5.3 operators via loader so the Luau parser never sees ~, &, |, <<, >>
     LF("local %s,%s,%s,%s,%s,%s", bXor,bNot,bAnd,bOr,bShl,bShr)
-    LF("if type(bit32)=='table' and type(bit32.bxor)=='function' and type(bit32.bnot)=='function' and type(bit32.band)=='function' and type(bit32.bor)=='function' then")
+    LF("local bit32Available=type(bit32)=='table' and type(bit32.bxor)=='function' and type(bit32.bnot)=='function' and type(bit32.band)=='function' and type(bit32.bor)=='function'")
+    LF("if bit32Available then")
     LF("  %s=bit32.bxor;%s=bit32.bnot;%s=bit32.band;%s=bit32.bor", bXor,bNot,bAnd,bOr)
     -- bit32.lshift and bit32.rshift may be absent in some Roblox Luau builds.
     -- Fall back to a math-based equivalent using bit32.band (always present).
