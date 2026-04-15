@@ -300,14 +300,14 @@ function Utils.obfuscate_int_deep(n, xorname)
         elseif form == 5 then
             local p = math.random(1, 0x3FFF)
             local q = math.random(1, 0x3FFF)
-            return string.format("((%d+%d)-(%d-%d))", result, p, q, p - q)
+            return string.format("((%d+%d)-(%d+%d))", result, p, q, p - q)
         elseif form == 6 then
             local p = math.random(1, 0x1FFF)
             return string.format("((%d+%d)-%d)", result, p, p)
         else
             local p = math.random(1, 0x3FFF)
             local q = math.random(1, 0x3FFF)
-            return string.format("((%d-%d)+(%d+%d))", result, p, q, p - q)
+            return string.format("((%d-%d)+(%d+%d-%d))", result, p, p, q, q)
         end
     end
 end
