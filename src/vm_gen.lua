@@ -345,7 +345,43 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
             rm_entries[shuffled+1] = tostring(revmap[shuffled] or 0)
         end
 
-        -- Base91 decoder for key/nonce
+        -- Helper (at generation time): XOR-encode a string with a random mask,
+        -- producing a string.char(...) literal and the mask used.
+        local function xor_field(s)
+            local mask = math.random(1, 255)
+            local bytes = {}
+            for i = 1, #s do bytes[i] = tostring(s:byte(i) ~ mask) end
+            return string.format("string.char(%s)", table.concat(bytes, ",")), mask
+        end
+
+        -- Pre-encode every CFG field name so that the literal strings "key",
+        -- "nonce", "sxor", "sha", "revmap" never appear in the generated output.
+        local kf_enc,  kf_mask  = xor_field("key")
+        local nf_enc,  nf_mask  = xor_field("nonce")
+        local sf_enc,  sf_mask  = xor_field("sxor")
+        local shf_enc, shf_mask = xor_field("sha")
+        local rmf_enc, rmf_mask = xor_field("revmap")
+
+        -- ── Junk dead-code blocks (~110 KB total) ──────────────────────────────
+        -- Each block is a self-contained `do local _X={N1,N2,...} end` that
+        -- allocates and immediately discards a large random-number table.
+        -- Blocks are syntactically valid Lua and never affect execution.
+        -- Number of entries per block and number of blocks are tuned so that
+        -- the collapsed single-line output grows by ≥100 KB.
+        local JUNK_BLOCKS   = 9
+        local JUNK_PER_BLOCK = 2000   -- numeric entries per table (~12 KB each)
+        for _jb = 1, JUNK_BLOCKS do
+            local jname = utils.rand_name(6, 12)
+            local entries = {}
+            for _je = 1, JUNK_PER_BLOCK do
+                entries[_je] = tostring(math.random(0, 999999999))
+            end
+            H("do local " .. jname .. "={" .. table.concat(entries, ",") .. "} end")
+        end
+
+        -- ── Runtime helper functions ────────────────────────────────────────────
+
+        -- Base91 decoder for key/nonce (emitted into the output script).
         HF("local function _b91d(_s)")
         HF("  local _a=%s", b91_alpha_lit)
         HF("  local _m={}")
@@ -370,9 +406,21 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
         HF("  return table.concat(_o)")
         H("end")
 
-        -- Emit config table
-        HF("local %s={key=_b91d(%s),nonce=_b91d(%s),sxor=%d,sha={[0]=%s},revmap={[0]=%s}}",
-           cfg_var, key_b91_lit, nonce_b91_lit, sxor_byte, table.concat(sha_entries, ","), table.concat(rm_entries, ","))
+        -- XOR field-name decoder: _sk(encoded_bytes, mask) → plain string.
+        -- Used to reconstruct "key","nonce","sxor","sha","revmap" at runtime
+        -- without those literal strings appearing anywhere in the generated code.
+        H("local function _sk(_x,_m) local _t={} for _i=1,#_x do _t[_i]=string.char(_x:byte(_i)~_m) end return table.concat(_t) end")
+
+        -- ── Emit config table via indirect (XOR-decoded) field names ──────────
+        -- The cfg table must match the shape expected by runtime/vm.lua:
+        --   cfg.key, cfg.nonce, cfg.sxor, cfg.sha, cfg.revmap
+        -- None of those field-name strings appear literally below.
+        HF("local %s={}", cfg_var)
+        HF("%s[_sk(%s,%d)]=_b91d(%s)", cfg_var, kf_enc,  kf_mask,  key_b91_lit)
+        HF("%s[_sk(%s,%d)]=_b91d(%s)", cfg_var, nf_enc,  nf_mask,  nonce_b91_lit)
+        HF("%s[_sk(%s,%d)]=%d",         cfg_var, sf_enc,  sf_mask,  sxor_byte)
+        HF("%s[_sk(%s,%d)]={[0]=%s}",   cfg_var, shf_enc, shf_mask, table.concat(sha_entries, ","))
+        HF("%s[_sk(%s,%d)]={[0]=%s}",   cfg_var, rmf_enc, rmf_mask, table.concat(rm_entries, ","))
 
         -- HTTP loader (Roblox game:HttpGet)
         -- Runtime URL: split into masked chunks so the plain URL never appears literally.
