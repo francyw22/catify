@@ -144,8 +144,9 @@ end
 ---@param key     string  AES-256 key (32 bytes) used to encrypt the bytecode blob
 ---@param nonce   string  AES-256-CTR nonce (8 bytes)
 ---@param utils   table   The Utils module (for aes256_ctr, sha256, base91_enc, rand_names)
+---@param vm_meta table|nil Optional VM metadata ({ virtual_ops = {...} })
 ---@return string  Lua source
-function VmGen.generate(proto, revmap, key, nonce, utils)
+function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     -- ── 1. Serialize + encrypt the custom bytecode ───────────────────────────
     local sxor_byte = math.random(1, 255)     -- per-session string XOR key
     local raw  = serialize_proto(proto, sxor_byte)
@@ -313,6 +314,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     for shuffled = 0, 46 do
         fwdmap[revmap[shuffled] or shuffled] = shuffled
     end
+    local virtual_ops = (vm_meta and vm_meta.virtual_ops) or {}
 
     -- ── 4. Junk-code snippets (opaque predicates, dead branches) ─────────────
     -- Each form picks its own fresh single-letter or short names so that
@@ -337,7 +339,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         return _JN[i], _JN[j], _JN[k2]
     end
 
-    -- Ten forms of always-dead opaque predicates / no-op computations:
+    -- Thirteen forms of always-dead opaque predicates / no-op computations:
     --  form 1: x XOR x == 0, never > 0
     --  form 2: n // n == 1, never < 1
     --  form 3: (a+b)*c - (a+b)*c == 0, never > 1
@@ -348,6 +350,9 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     --  form 8: string.rep + #  identity
     --  form 9: fake config table with dead branch (looks like real init code)
     --  form 10: fake string sanitize (dead upper/lower branch)
+    --  form 11: byte-pack roundtrip identity with dead mismatch branch
+    --  form 12: deterministic accumulator fold (dead negative branch)
+    --  form 13: fake checksum state machine (dead overflow branch)
     local junk_forms = {
         -- form 1: x XOR x == 0
         function(indent)
@@ -442,6 +447,32 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
             return string.format(
                 "%sdo local %s=%q;local %s=string.upper(%s);if #%s<0 then %s=%s end end\n",
                 indent, v1, w, v2, v1, v2, v1, v2)
+        end,
+        -- form 11: byte-pack roundtrip identity
+        function(indent)
+            local v1, v2 = jpick2()
+            local c = string.char(math.random(97, 122))
+            return string.format(
+                "%sdo local %s=%q;local %s=string.char(string.byte(%s));if %s~=%s then %s=nil end end\n",
+                indent, v1, c, v2, v1, v2, v1, v2)
+        end,
+        -- form 12: deterministic accumulator fold
+        function(indent)
+            local v1, v2 = jpick2()
+            local n = math.random(3, 9)
+            local base = math.random(2, 40)
+            return string.format(
+                "%sdo local %s=%d;for %s=1,%d do %s=%s+1 end;if %s<0 then %s=%s-1 end end\n",
+                indent, v1, base, v2, n, v1, v1, v1, v1, v1)
+        end,
+        -- form 13: fake checksum state machine
+        function(indent)
+            local v1, v2, v3 = jpick3()
+            local a = math.random(10, 90)
+            local b = math.random(3, 25)
+            return string.format(
+                "%sdo local %s=%d;local %s=%d;local %s=%s(%s,%s);if %s>2147483647 then %s=0 end end\n",
+                indent, v1, a, v2, b, v3, bAnd, v1, v2, v3, v3)
         end,
     }
     local function junk_stmt(indent)
@@ -906,6 +937,10 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("  end")
     -- [46] EXTRAARG  (consumed by LOADKX/SETLIST; treated as no-op if reached alone)
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) end", vDispatch, fwdmap[46], eA,eB,eC,eBx,eSBx)
+    -- [47..63] VM-only virtual opcodes (decoy/no-op handlers for junk payload)
+    for _, vop in ipairs(virtual_ops) do
+        LF("  %s[%d]=function(%s,%s,%s,%s,%s) end", vDispatch, vop, eA,eB,eC,eBx,eSBx)
+    end
 
     src[#src+1] = junk_block("  ", math.random(1, 2))
 
@@ -1185,6 +1220,16 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Anti-environmental logger 3: numbers must not have a metatable (some loggers patch this)
     if math.random(1, 2) == 1 then
         at_load("do local _m=getmetatable(0);if _m~=nil then error('Catify: env logger detected (nummt)',0)end end")
+    end
+    -- Anti-environmental logger 4: detect Lua-level hooks over critical C builtins.
+    -- Roblox-safe: only runs when debug.getinfo exists.
+    if math.random(1, 2) == 1 then
+        at_load(string.format("do local _ce=%s;local _d=(type(_ce)=='table' and rawget(_ce,'debug')) or nil;local _gi=_d and rawget(_d,'getinfo');if type(_gi)=='function' then local _chk={tostring,type,pcall,rawget,rawset,string.byte,string.char,table.concat,math.abs};for _,_f in ipairs(_chk) do local _ok,_inf=pcall(_gi,_f);if _ok and type(_inf)=='table' and _inf.what and _inf.what~='C' then error('Catify: env logger detected (hookfn)',0) end end end end", env_expr))
+    end
+    -- Anti-environmental logger 5: loader function should remain a native C closure.
+    -- Roblox-safe: guarded by debug.getinfo availability.
+    if math.random(1, 2) == 1 then
+        at_load(string.format("do local _ce=%s;local _d=(type(_ce)=='table' and rawget(_ce,'debug')) or nil;local _gi=_d and rawget(_d,'getinfo');local _ld=(type(load)=='function' and load) or (type(loadstring)=='function' and loadstring);if type(_gi)=='function' and type(_ld)=='function' then local _ok,_inf=pcall(_gi,_ld);if _ok and type(_inf)=='table' and _inf.what and _inf.what~='C' then error('Catify: env logger detected (loaderhook)',0) end end end", env_expr))
     end
 
     -- Watermark: obfuscated ASCII cat watermark (sits in memory, never printed)
