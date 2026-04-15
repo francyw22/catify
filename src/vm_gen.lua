@@ -286,6 +286,11 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local bOr  = vn()   -- bitwise OR   (a | b)
     local bShl = vn()   -- left shift   (a << b)
     local bShr = vn()   -- right shift  (a >> b)
+    -- Binary codec helpers for runtimes without string.pack/unpack (e.g. Luau)
+    local rdU4le = vn()
+    local rdI4le = vn()
+    local rdF64le = vn()
+    local wrU4be = vn()
 
     -- Helper: emit an obfuscated integer expression using the runtime bXor function
     -- so no ~ operator appears in the generated output (Luau/Lua 5.1 compatible).
@@ -477,6 +482,20 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("  %s=load'return function(a,b)return a<<b end'()", bShl)
     LF("  %s=load'return function(a,b)return a>>b end'()", bShr)
     LF("end")
+    -- Binary helpers: avoid hard dependency on string.pack/unpack at runtime.
+    LF("local function %s(_s,_p) local _b1,_b2,_b3,_b4=_s:byte(_p,_p+3);return _b1+_b2*256+_b3*65536+_b4*16777216,_p+4 end", rdU4le)
+    LF("local function %s(_s,_p) local _v,_np=%s(_s,_p);if _v>=2147483648 then _v=_v-4294967296 end;return _v,_np end", rdI4le, rdU4le)
+    LF("local function %s(_s,_p)", rdF64le)
+    LF("  if type(string)=='table' and type(string.unpack)=='function' then return string.unpack('<d',_s,_p) end")
+    LF("  local _b1,_b2,_b3,_b4,_b5,_b6,_b7,_b8=_s:byte(_p,_p+7)")
+    LF("  local _sgn=(_b8>=128) and -1 or 1")
+    LF("  local _exp=((_b8%%128)*16)+math.floor(_b7/16)")
+    LF("  local _mant=(_b7%%16)*281474976710656+_b6*1099511627776+_b5*4294967296+_b4*16777216+_b3*65536+_b2*256+_b1")
+    LF("  if _exp==0 then if _mant==0 then return _sgn*0,_p+8 end;return _sgn*(2^(1-1023))*(_mant/4503599627370496),_p+8 end")
+    LF("  if _exp==2047 then if _mant==0 then return _sgn*(1/0),_p+8 end;return 0/0,_p+8 end")
+    LF("  return _sgn*(2^(_exp-1023))*(1+_mant/4503599627370496),_p+8")
+    LF("end")
+    LF("local function %s(_v) return string.char(%s(%s(_v,24),255),%s(%s(_v,16),255),%s(%s(_v,8),255),%s(_v,255)) end", wrU4be, bAnd, bShr, bAnd, bShr, bAnd, bShr, bAnd)
     -- Junk block at top of do-scope (dead computations, not reachable by any real code path)
     src[#src+1] = junk_block("", math.random(2, 4))
     -- ── Emit payload concatenation helper (decoy wrapper using allocated names) ──
@@ -589,25 +608,20 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("local %s", dPos)
     LF("local %s", dData)
     LF("local function %s() local v=%s:byte(%s);%s=%s+1;return v end", dRb, dData, dPos, dPos, dPos)
-    LF("local function %s() local v,p=string.unpack('<i4',%s,%s);%s=p;return v end", dRi32, dData, dPos, dPos)
-    -- dRi64: detect at runtime whether '<i8' unpack works (64-bit Lua / Roblox),
-    -- and fall back to double arithmetic for 32-bit platforms.
-    -- Probe: bytes \0\0\0\128\0\0\0\0 are LE 0x0000000080000000 = 2^31 as i64.
-    -- That value exceeds the 32-bit signed range, so the pcall fails on 32-bit Lua.
-    LF("local _i8ok=(function() local ok=pcall(string.unpack,'<i8','\\0\\0\\0\\128\\0\\0\\0\\0',1);return ok end)()")
+    LF("local function %s() local v,p=%s(%s,%s);%s=p;return v end", dRi32, rdI4le, dData, dPos, dPos)
+    -- dRi64: decode via two LE u32 words (works on Lua/Luau without string.unpack).
     LF("local function %s()", dRi64)
-    LF("  if _i8ok then local _v,_p=string.unpack('<i8',%s,%s);%s=_p;return _v end", dData, dPos, dPos)
-    LF("  local _lo,_p1=string.unpack('<I4',%s,%s);%s=_p1", dData, dPos, dPos)
-    LF("  local _hi,_p2=string.unpack('<I4',%s,%s);%s=_p2", dData, dPos, dPos)
+    LF("  local _lo,_p1=%s(%s,%s);%s=_p1", rdU4le, dData, dPos, dPos)
+    LF("  local _hi,_p2=%s(%s,%s);%s=_p2", rdU4le, dData, dPos, dPos)
     LF("  if _hi==0 then return _lo end")
     LF("  local _v=_lo+_hi*(2^32)")
     LF("  if _hi>=(2^31) then _v=_v-(2^64) end")
     LF("  return _v")
     LF("end")
-    LF("local function %s() local v,p=string.unpack('<d',%s,%s);%s=p;return v end",  dRf64, dData, dPos, dPos)
+    LF("local function %s() local v,p=%s(%s,%s);%s=p;return v end",  dRf64, rdF64le, dData, dPos, dPos)
     -- dRstr: emit once (correctly advancing pos)
-    LF("local function %s() local _n,_p=string.unpack('<i4',%s,%s);%s=_p;local _s=%s:sub(%s,%s+_n-1);%s=%s+_n;return _s end",
-       dRstr, dData, dPos, dPos, dData, dPos, dPos, dPos, dPos)
+    LF("local function %s() local _n,_p=%s(%s,%s);%s=_p;local _s=%s:sub(%s,%s+_n-1);%s=%s+_n;return _s end",
+       dRstr, rdI4le, dData, dPos, dPos, dData, dPos, dPos, dPos, dPos)
 
     -- Emit the string-constant XOR key as an obfuscated math expression so it
     -- is not visible as a plain integer literal in the output.
@@ -629,8 +643,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("  p.maxstacksize=%s()", dRb)
     LF("  local sc=%s(); p.sizecode=sc", dRi32)
     LF("  local code={}; p.code=code")
-    LF("  for i=0,sc-1 do code[i]=string.unpack('<I4',%s,%s); %s=%s+4 end",
-       dData, dPos, dPos, dPos)
+    LF("  for i=0,sc-1 do local _v,_p=%s(%s,%s);code[i]=_v;%s=_p end",
+       rdU4le, dData, dPos, dPos)
     -- Constants
     LF("  local sk=%s(); p.sizek=sk", dRi32)
     LF("  local k={}; p.k=k")
@@ -999,10 +1013,10 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("  local _len=#_s;local _bl=_len*8")
     LF("  local _pd=_s..'\\x80'")
     LF("  while #_pd%%64~=56 do _pd=_pd..'\\x00' end")
-    LF("  _pd=_pd..string.pack('>I4',%s(%s(_bl,32),0xFFFFFFFF))..string.pack('>I4',%s(_bl,0xFFFFFFFF))", bAnd,bShr,bAnd)
+    LF("  _pd=_pd..%s(%s(%s(_bl,32),0xFFFFFFFF))..%s(%s(_bl,0xFFFFFFFF))", wrU4be,bAnd,bShr,wrU4be,bAnd)
     LF("  local %s={}", shaW)
     LF("  for _blk=1,#_pd,64 do")
-    LF("    for _i=1,16 do %s[_i]=%s(string.unpack('>I4',_pd,_blk+(_i-1)*4),0xFFFFFFFF) end", shaW, bAnd)
+    LF("    for _i=1,16 do local _o=_blk+(_i-1)*4;local _b1,_b2,_b3,_b4=_pd:byte(_o,_o+3);%s[_i]=%s(_b1*16777216+_b2*65536+_b3*256+_b4,0xFFFFFFFF) end", shaW, bAnd)
     LF("    for _i=17,64 do")
     LF("      local _s0=%s(%s(_rr(%s[_i-15],7),_rr(%s[_i-15],18)),%s(%s[_i-15],3))", bXor,bXor,shaW,shaW,bShr,shaW)
     LF("      local _s1=%s(%s(_rr(%s[_i-2],17),_rr(%s[_i-2],19)),%s(%s[_i-2],10))", bXor,bXor,shaW,shaW,bShr,shaW)
