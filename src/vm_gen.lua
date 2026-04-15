@@ -602,7 +602,17 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
         H("end)")
         HF("if not %s then error('Catify: failed to load runtime - '..tostring(%s),0) end", ok_var, err_var)
 
-        return (table.concat(out):gsub("[\r\n]+", " "))
+        local body = (table.concat(out):gsub("[\r\n]+", " "))
+        local wrapped = {}
+        local wLoad = utils.rand_name(4, 8)
+        local wChunk = utils.rand_name(4, 8)
+        local wErr = utils.rand_name(4, 8)
+        wrapped[#wrapped+1] = string.format("local %s=(type(loadstring)=='function' and loadstring) or (type(load)=='function' and load)", wLoad)
+        wrapped[#wrapped+1] = string.format("if type(%s)~='function' then error('Catify: load/loadstring unavailable',0) end", wLoad)
+        wrapped[#wrapped+1] = string.format("local %s,%s=%s(\"%s\")", wChunk, wErr, wLoad, utils.to_escape(body))
+        wrapped[#wrapped+1] = string.format("if type(%s)~='function' then error('Catify: wrapped compile failed: '..tostring(%s),0) end", wChunk, wErr)
+        wrapped[#wrapped+1] = string.format("%s()", wChunk)
+        return table.concat(wrapped, " ")
     end
     -- ── End HTTP-runtime mode ─────────────────────────────────────────────────
 
