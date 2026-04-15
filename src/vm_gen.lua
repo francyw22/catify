@@ -339,7 +339,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
         return _JN[i], _JN[j], _JN[k2]
     end
 
-    -- Thirteen forms of always-dead opaque predicates / no-op computations:
+    -- Fourteen forms of always-dead opaque predicates / no-op computations:
     --  form 1: x XOR x == 0, never > 0
     --  form 2: n // n == 1, never < 1
     --  form 3: (a+b)*c - (a+b)*c == 0, never > 1
@@ -353,6 +353,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     --  form 11: byte-pack round-trip identity with dead mismatch branch
     --  form 12: deterministic accumulator fold (dead negative branch)
     --  form 13: fake checksum state machine (dead overflow branch)
+    --  form 14: shuffled byte-lookup table build (decoy cipher setup)
     local junk_forms = {
         -- form 1: x XOR x == 0
         function(indent)
@@ -473,6 +474,14 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
             return string.format(
                 "%sdo local %s=%d;local %s=%d;local %s=%s(%s,%s);if %s>2147483647 then %s=0 end end\n",
                 indent, v1, a, v2, b, v3, bAnd, v1, v2, v3, v3)
+        end,
+        -- form 14: shuffled byte-lookup table build (decoy cipher setup, result discarded)
+        function(indent)
+            local v1, v2, v3 = jpick3()
+            local n = math.random(16, 32)
+            return string.format(
+                "%sdo local %s={};for _i=1,%d do %s[_i]=_i end;local %s=0;for _,_v in ipairs(%s) do %s=%s(%s+_v,32767) end;if %s<0 then %s=nil end end\n",
+                indent, v1, n, v1, v2, v1, v2, bAnd, v2, v2, v3)
         end,
     }
     local function junk_stmt(indent)
@@ -1245,6 +1254,37 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
         })
         at_load(string.format(loader_hook_check, env_expr))
     end
+
+    -- Anti-environmental logger 6: tostring address-spoof detection.
+    -- Some Roblox environment loggers hook tostring() and return a fixed/collapsed
+    -- address for every table, making two distinct tables stringify identically.
+    -- In a legitimate runtime, distinct tables always have distinct addresses.
+    -- The sub(8,15) slice isolates just the hex-address segment, which is more
+    -- robust against prefixes that vary by platform (e.g. "table: 0x" vs "table: ").
+    -- On detection: a randomly chosen deterrent message is printed (wrapped in pcall
+    -- so even a broken print cannot prevent the error), then execution is aborted.
+    -- tick() is Roblox-specific; the fallback to os.time keeps this standard-Lua-safe.
+    at_load(table.concat({
+        "do",
+        "local _t1=tostring({});local _t2=tostring({});",
+        "local _a1=string.sub(_t1,8,15);local _a2=string.sub(_t2,8,15);",
+        "if _a1==_a2 then",
+        "pcall(function()",
+        "local _ts=(type(tick)=='function' and tick())",
+        "or (type(os)=='table' and type(os.time)=='function' and os.time()) or 0;",
+        "math.randomseed(_ts);",
+        "local _m={",
+        '"yk i always wonder if skids like you have a life outside of discord lmfao",',
+        '"you must be a loser irl to be this chronically online in discord",',
+        '"what a sad way to spend your time honestly",',
+        '"remember to take a shower! you stink lil bro",',
+        '"imagine trying to log roblox scripts in 2026 you are a certified loser"',
+        "};",
+        "print(_m[math.random(1,#_m)])",
+        "end);",
+        "error('Catify: env logger detected (tostring)',0)",
+        "end end",
+    }))
 
     -- Watermark: obfuscated ASCII cat watermark (sits in memory, never printed)
     local wm_bytes = {32,32,47,92,95,47,92,32,32,10,32,40,111,46,111,32,41,10,32,32,62,32,94,32,60,10,32,67,97,116,105,102,121,32,118,50,46,48}
