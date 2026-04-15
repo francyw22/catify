@@ -179,11 +179,11 @@ local function junk_move_self(junk_ops)
 end
 
 --- Build a random single junk instruction using the provided shuffled opcodes.
----@param junk_ops table  table with .loadbool, .move, .loadnil shuffled opcodes
+---@param junk_ops table  table with .loadbool, .move, .loadnil, .jmp shuffled opcodes
 ---@param virtual_ops table|nil  optional list of VM-only no-op opcode ids (47..63)
 ---@return integer  encoded instruction word
 local function make_junk_inst(junk_ops, virtual_ops)
-    local choice = math.random(1, 5)
+    local choice = math.random(1, 6)
     if choice == 1 then
         -- LOADBOOL R(hi) 0 0
         return make_inst(junk_ops.loadbool, junk_reg(), 0, 0)
@@ -196,6 +196,12 @@ local function make_junk_inst(junk_ops, virtual_ops)
     elseif choice == 4 then
         -- LOADBOOL R(hi) 1 0
         return make_inst(junk_ops.loadbool, junk_reg(), 1, 0)
+    elseif choice == 5 then
+        -- JMP A=0 sBx=0  – no-op jump to next instruction (A=0 → no upvalue close)
+        -- sBx=0 means pc += 0 after pre-increment → lands on the very next instruction.
+        -- The inject_junk fixup loop will correctly adjust sBx if more junk is inserted
+        -- between this JMP and its intended target instruction.
+        return set_sbx(make_inst(junk_ops.jmp, 0, 0, 0), 0)
     else
         -- VM-only virtual opcode (explicit no-op handler in generated dispatch table)
         if virtual_ops and #virtual_ops > 0 then
@@ -252,6 +258,7 @@ function Passes.inject_junk(proto, opmap, count, virtual_ops)
         loadbool = opmap and (opmap[3] or 3) or 3,   -- LOADBOOL
         move     = opmap and (opmap[0] or 0) or 0,   -- MOVE
         loadnil  = opmap and (opmap[4] or 4) or 4,   -- LOADNIL
+        jmp      = opmap and (opmap[30] or 30) or 30, -- JMP (sBx=0 = NOP)
     }
 
     -- Real opcode ids used by safety checks.
