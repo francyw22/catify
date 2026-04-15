@@ -669,8 +669,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
             local a = math.random(1, 0x7FFF)
             local b = math.random(1, 0xFF)
             return string.format(
-                "%sdo local %s=%d*%d;local %s=%s(%s,%s);if %s>0 then %s=%s+%d end end\n",
-                indent, v1, a, b, v2, bXor, v1, v1, v2, v1, v1, math.random(1, 0xFF))
+                "%sdo local %s=%d*%d;local %s=_bX_(%s,%s);if %s>0 then %s=%s+%d end end\n",
+                indent, v1, a, b, v2, v1, v1, v2, v1, v1, math.random(1, 0xFF))
         end,
         -- form 2: integer division identity
         function(indent)
@@ -717,8 +717,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
             local y = math.random(1, 0xFFFF)
             local z = x ~ y
             return string.format(
-                "%sdo local %s=%d;local %s=%d;local %s=%s(%s,%s);if %s(%s,%s)>0 then %s=%s(%s,1) end end\n",
-                indent, v1, x, v2, y, v3, bXor, v1, v2, bXor, v3, v1, v2, bOr, v2)
+                "%sdo local %s=%d;local %s=%d;local %s=_bX_(%s,%s);if _bX_(%s,%s)>0 then %s=_bO_(%s,1) end end\n",
+                indent, v1, x, v2, y, v3, v1, v2, v3, v1, v2, v2)
         end,
         -- form 7: math.max identity (always picks first arg)
         function(indent)
@@ -780,26 +780,33 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
             local a = math.random(10, 90)
             local b = math.random(3, 25)
             return string.format(
-                "%sdo local %s=%d;local %s=%d;local %s=%s(%s,%s);if %s>2147483647 then %s=0 end end\n",
-                indent, v1, a, v2, b, v3, bAnd, v1, v2, v3, v3)
+                "%sdo local %s=%d;local %s=%d;local %s=_bA_(%s,%s);if %s>2147483647 then %s=0 end end\n",
+                indent, v1, a, v2, b, v3, v1, v2, v3, v3)
         end,
         -- form 14: shuffled byte-lookup table build (decoy cipher setup, result discarded)
         function(indent)
             local v1, v2, v3 = jpick3()
             local n = math.random(16, 32)
             return string.format(
-                "%sdo local %s={};for _i=1,%d do %s[_i]=_i end;local %s=0;for _,_v in ipairs(%s) do %s=%s(%s+_v,32767) end;if %s<0 then %s=nil end end\n",
-                indent, v1, n, v1, v2, v1, v2, bAnd, v2, v2, v3)
+                "%sdo local %s={};for _i=1,%d do %s[_i]=_i end;local %s=0;for _,_v in ipairs(%s) do %s=_bA_(%s+_v,32767) end;if %s<0 then %s=nil end end\n",
+                indent, v1, n, v1, v2, v1, v2, v2, v2, v3)
         end,
     }
     local function junk_stmt(indent)
         return junk_forms[math.random(1, #junk_forms)](indent)
     end
-    -- Emit `k` consecutive junk statements with the given indent.
+    -- Emit `k` junk statements encoded as a Base91 chunk decoded+loaded at runtime.
+    -- The chunk is wrapped in a function accepting (_bX_,_bA_,_bO_) so the
+    -- placeholder names in junk_forms resolve to the actual bitwise helpers.
     local function junk_block(indent, k)
-        local out = {}
-        for _ = 1, k do out[#out+1] = junk_stmt(indent) end
-        return table.concat(out)
+        local stmts = {}
+        for _ = 1, k do stmts[#stmts+1] = junk_stmt("") end
+        local body = table.concat(stmts):gsub("[\r\n]+", " ")
+        local chunk_src = "return function(_bX_,_bA_,_bO_) " .. body .. " end"
+        local b91 = utils.base91_enc(chunk_src)
+        return string.format(
+            "%sdo local _jf=%s(%s(%q));if type(_jf)=='function' then local _jb=_jf();if type(_jb)=='function' then %s(_jb,%s,%s,%s) end end end\n",
+            indent, vLoadCompat, vB91Dec, b91, vPcallfn, bXor, bAnd, bOr)
     end
 
     -- Context-aware junk forms: reference live VM variables so static analysis
@@ -810,67 +817,73 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
         function(indent)
             local v1 = jpick()
             return string.format(
-                "%sdo local %s=type(%s[0] and %s[0].v or nil);if %s=='userdata' and false then %s=nil end end\n",
-                indent, v1, eRegs, eRegs, v1, v1)
+                "%sdo local %s=type(_eR_[0] and _eR_[0].v or nil);if %s=='userdata' and false then %s=nil end end\n",
+                indent, v1, v1, v1)
         end,
         -- ctx form 2: PC is always >= 0 after reset; dead negative branch
         function(indent)
             local v1, v2 = jpick2()
             return string.format(
-                "%sdo local %s=%s;local %s=%s+0;if %s<-131071 then %s=%s+1 end end\n",
-                indent, v1, ePc, v2, v1, v2, v1, v2)
+                "%sdo local %s=_eP_;local %s=%s+0;if %s<-131071 then %s=%s+1 end end\n",
+                indent, v1, v2, v1, v2, v1, v2)
         end,
         -- ctx form 3: eTop starts at -1, multiplied by 0 gives 0, dead non-zero branch
         function(indent)
             local v1 = jpick()
             return string.format(
-                "%sdo local %s=%s*0;if %s~=0 then %s=%s+1 end end\n",
-                indent, v1, eTop, v1, v1, v1)
+                "%sdo local %s=_eT_*0;if %s~=0 then %s=%s+1 end end\n",
+                indent, v1, v1, v1, v1)
         end,
         -- ctx form 4: proto.maxstacksize is always a positive integer, never < 0
         function(indent)
             local v1, v2 = jpick2()
             return string.format(
-                "%sdo local %s=%s.maxstacksize or 0;local %s=%s*%s;if %s<0 then %s=%s end end\n",
-                indent, v1, eProto, v2, v1, v1, v2, v1, v1)
+                "%sdo local %s=_ePr_.maxstacksize or 0;local %s=%s*%s;if %s<0 then %s=%s end end\n",
+                indent, v1, v2, v1, v1, v2, v1, v1)
         end,
         -- ctx form 5: eCode is always a table; type check, dead string branch
         function(indent)
             local v1 = jpick()
             return string.format(
-                "%sdo local %s=type(%s);if %s=='string' then error('',0) end end\n",
-                indent, v1, eCode, v1)
+                "%sdo local %s=type(_eC_);if %s=='string' then error('',0) end end\n",
+                indent, v1, v1)
         end,
         -- ctx form 6: args table is always a table (never nil after vPack)
         function(indent)
             local v1 = jpick()
             return string.format(
-                "%sdo local %s=type(%s);if %s~='table' and false then %s=%s end end\n",
-                indent, v1, eArgs, v1, v1, v1)
+                "%sdo local %s=type(_eAr_);if %s~='table' and false then %s=%s end end\n",
+                indent, v1, v1, v1, v1)
         end,
         -- ctx form 7: accumulate XOR of ePc with a constant; result is dead (never inspected)
         function(indent)
             local v1, v2 = jpick2()
             local magic = math.random(1, 0x7FFF)
             return string.format(
-                "%sdo local %s=%d;local %s=%s(%s,%s);if %s>0x7FFFFFFF and false then %s=0 end end\n",
-                indent, v1, magic, v2, bXor, v1, ePc, v2, v2)
+                "%sdo local %s=%d;local %s=_bX_(%s,_eP_);if %s>0x7FFFFFFF and false then %s=0 end end\n",
+                indent, v1, magic, v2, v1, v2, v2)
         end,
         -- ctx form 8: inspect a high register slot type (these are always table boxes)
         function(indent)
             local v1 = jpick()
             local hi_reg = math.random(200, 220)
             return string.format(
-                "%sdo local %s=%s[%d];if type(%s)~='table' and false then %s=nil end end\n",
-                indent, v1, eRegs, hi_reg, v1, v1)
+                "%sdo local %s=_eR_[%d];if type(%s)~='table' and false then %s=nil end end\n",
+                indent, v1, hi_reg, v1, v1)
         end,
     }
     local function ctx_junk_block(indent, k)
-        local out = {}
+        local stmts = {}
         for _ = 1, k do
-            out[#out+1] = ctx_junk_forms[math.random(1, #ctx_junk_forms)](indent)
+            stmts[#stmts+1] = ctx_junk_forms[math.random(1, #ctx_junk_forms)]("")
         end
-        return table.concat(out)
+        local body = table.concat(stmts):gsub("[\r\n]+", " ")
+        local chunk_src = "return function(_bX_,_bA_,_bO_,_eR_,_eP_,_eT_,_ePr_,_eC_,_eAr_) " .. body .. " end"
+        local b91 = utils.base91_enc(chunk_src)
+        return string.format(
+            "%sdo local _jf=%s(%s(%q));if type(_jf)=='function' then local _jb=_jf();if type(_jb)=='function' then %s(_jb,%s,%s,%s,%s,%s,%s,%s,%s,%s) end end end\n",
+            indent, vLoadCompat, vB91Dec, b91, vPcallfn,
+            bXor, bAnd, bOr, eRegs, ePc, eTop, eProto, eCode, eArgs)
     end
 
     -- ── 5. Assemble source ────────────────────────────────────────────────────
