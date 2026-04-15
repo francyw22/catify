@@ -9,14 +9,14 @@ heavily protected VM bytecode — matching the `superflow_bytecode` format used 
 
 | Protection layer | Details |
 |---|---|
-| **Custom VM** | Full Lua 5.3 VM in generated source; all 47 opcodes implemented |
+| **Custom VM** | Full Lua 5.3 VM in generated source; all 47 opcodes + virtual decoy opcodes |
 | **Opcode shuffle** | Real opcode numbers replaced by random shuffled IDs per output |
 | **AES-256-CTR encryption** | Bytecode payload encrypted with a fresh 32-byte key + 8-byte nonce per run |
 | **Base91 payload** | Encrypted blob encoded as a single compact Base91 string (`superflow_bytecode`) |
 | **SHA-256 integrity** | Runtime SHA-256 check on the encrypted blob (8 obfuscated word comparisons) |
-| **Anti-keylogger checks** | 4 runtime checks: debug hook, io library, string metatable, pcall integrity |
+| **Anti-keylogger checks** | Runtime checks for debug hook, io library, string metatable, pcall integrity |
 | **Debug-hook detection** | Detects `debug.sethook` / `debug.getinfo` usage at runtime |
-| **Environment check** | Verifies critical globals (`tostring`, `type`, `string`, …) are intact |
+| **Environment check** | Verifies critical globals and detects common env/logger hook patterns |
 | **Junk injection** | Dead-code statements sprinkled throughout the VM dispatch loop |
 | **ASCII cat watermark** | Obfuscated watermark string embedded in generated output |
 

@@ -147,7 +147,7 @@ end
 --   • LOADBOOL R(200) 0 0  – load false into an unreachable high register
 --   • MOVE     R(200) R(200) – copy a high register to itself (identity NOP)
 --   • LOADNIL  R(200) 0    – set a high register range to nil
--- Each insertion point gets a random cluster of 1-3 junk instructions.
+-- Each insertion point gets a random cluster of 1-5 junk instructions.
 -- All sBx-based jump targets are corrected for the added instructions.
 
 --- Return a 32-bit Lua 5.3 instruction word (A B C format).
@@ -173,22 +173,57 @@ local function junk_reg()
     return 200 + math.random(0, 20)
 end
 
+local function junk_move_self(junk_ops)
+    local r = junk_reg()
+    return make_inst(junk_ops.move, r, r, 0)
+end
+
 --- Build a random single junk instruction using the provided shuffled opcodes.
 ---@param junk_ops table  table with .loadbool, .move, .loadnil shuffled opcodes
+---@param virtual_ops table|nil  optional list of VM-only no-op opcode ids (47..63)
 ---@return integer  encoded instruction word
-local function make_junk_inst(junk_ops)
-    local choice = math.random(1, 3)
+local function make_junk_inst(junk_ops, virtual_ops)
+    local choice = math.random(1, 5)
     if choice == 1 then
         -- LOADBOOL R(hi) 0 0
         return make_inst(junk_ops.loadbool, junk_reg(), 0, 0)
     elseif choice == 2 then
         -- MOVE R(hi) R(hi)  – copy a high register to itself
-        local r = junk_reg()
-        return make_inst(junk_ops.move, r, r, 0)
-    else
+        return junk_move_self(junk_ops)
+    elseif choice == 3 then
         -- LOADNIL R(hi) 0
         return make_inst(junk_ops.loadnil, junk_reg(), 0, 0)
+    elseif choice == 4 then
+        -- LOADBOOL R(hi) 1 0
+        return make_inst(junk_ops.loadbool, junk_reg(), 1, 0)
+    else
+        -- VM-only virtual opcode (explicit no-op handler in generated dispatch table)
+        if virtual_ops and #virtual_ops > 0 then
+            local vop = virtual_ops[math.random(1, #virtual_ops)]
+            return make_inst(vop, junk_reg(), math.random(0, 255), math.random(0, 255))
+        end
+        return junk_move_self(junk_ops)
     end
+end
+
+--- Build list of opcode ids unused by shuffled real opcodes (for VM-only no-op handlers).
+---@param opmap table|nil
+---@return table
+function Passes.virtual_opcodes(opmap)
+    local used = {}
+    if opmap then
+        for real = 0, 46 do
+            local sh = opmap[real]
+            if sh ~= nil then used[sh] = true end
+        end
+    else
+        for i = 0, 46 do used[i] = true end
+    end
+    local out = {}
+    for i = 47, 63 do
+        if not used[i] then out[#out + 1] = i end
+    end
+    return out
 end
 
 --- Insert junk instruction clusters into proto.code at random safe positions:
@@ -197,8 +232,9 @@ end
 ---   to account for the new instruction positions.
 ---@param proto table   mutated in-place (call after opcode_shuffle)
 ---@param opmap table   opmap[orig_op]=shuffled_op (for junk instruction opcode)
----@param count integer number of insertion clusters (each 1-3 instructions)
-function Passes.inject_junk(proto, opmap, count)
+---@param count integer number of insertion clusters (each 1-5 instructions)
+---@param virtual_ops table|nil list of VM-only no-op opcode ids (47..63)
+function Passes.inject_junk(proto, opmap, count, virtual_ops)
     count = count or 3
 
     -- Build revmap (shuffled → real) from opmap (real → shuffled)
@@ -268,10 +304,10 @@ function Passes.inject_junk(proto, opmap, count)
         for j = 1, npts do pts[#pts + 1] = candidates[j] end
         table.sort(pts)
 
-        -- 3. Assign a random cluster size (1-3) to each insertion point
+        -- 3. Assign a random cluster size (1-5) to each insertion point
         local cluster_sizes = {}
         for j = 1, npts do
-            cluster_sizes[j] = math.random(1, 3)
+            cluster_sizes[j] = math.random(1, 5)
         end
 
         -- 4. Build old_index → new_index mapping (cluster_sizes[pi] junks added before each pt)
@@ -295,7 +331,7 @@ function Passes.inject_junk(proto, opmap, count)
             -- Prepend junk cluster if this position was chosen
             if pi <= #pts and pts[pi] == i then
                 for _ = 1, cluster_sizes[pi] do
-                    new_code[ni] = make_junk_inst(junk_ops)
+                    new_code[ni] = make_junk_inst(junk_ops, virtual_ops)
                     ni = ni + 1
                 end
                 pi = pi + 1
@@ -332,7 +368,7 @@ end
 ---@param proto  table   Raw proto from Parser.parse()
 ---@param utils  table   Utils module
 ---@param opts   table   Optional: { junk_count=N }
----@return table final_proto, table revmap, table opmap
+---@return table final_proto, table revmap, table opmap, table vm_meta
 function Passes.run_all(proto, utils, opts)
     opts = opts or {}
 
@@ -348,15 +384,16 @@ function Passes.run_all(proto, utils, opts)
         local orig = revmap[shuffled]
         if orig then opmap[orig] = shuffled end
     end
+    local virtual_ops = Passes.virtual_opcodes(opmap)
 
     -- 3. Inject junk (after shuffle so junk uses shuffled opcode numbers)
     local jcount = opts.junk_count or math.random(opts.junk_min or 5, opts.junk_max or 14)
-    Passes.inject_junk(proto, opmap, jcount)
+    Passes.inject_junk(proto, opmap, jcount, virtual_ops)
 
     -- 4. String pass (currently no-op)
     proto = Passes.encrypt_strings(proto)
 
-    return proto, revmap, opmap
+    return proto, revmap, opmap, { virtual_ops = virtual_ops }
 end
 
 return Passes

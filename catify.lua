@@ -186,12 +186,12 @@ local function main(argv)
         }
 
         -- Run all bytecode-level passes
-        local final_proto, revmap
-        final_proto, revmap = Passes.run_all(proto, Utils, pass_opts)
+        local final_proto, revmap, _, vm_meta
+        final_proto, revmap, _, vm_meta = Passes.run_all(proto, Utils, pass_opts)
 
         -- Generate VM + encrypted output
         info("  Generating VM code...")
-        local generated = VmGen.generate(final_proto, revmap, key, nonce, Utils)
+        local generated = VmGen.generate(final_proto, revmap, key, nonce, Utils, vm_meta)
         info("  Generated VM size: %d bytes", #generated)
 
         if pass < opts.passes then
@@ -223,7 +223,7 @@ local function main(argv)
     local output_size   = #result_code
     info("Done!  %d → %d bytes  (%.1fx)",
          original_size, output_size, output_size / math.max(1, original_size))
-    info("Protected with: opcode shuffle, AES-256-CTR encryption, SHA-256 integrity, debug strip, junk injection (intensity %d), VM dispatch obfuscation, anti-tamper (14 checks), anti-env-logger (2 checks)", opts.intensity)
+    info("Protected with: opcode shuffle, AES-256-CTR encryption, SHA-256 integrity, debug strip, junk injection (intensity %d), VM dispatch obfuscation, anti-tamper checks, anti-env-logger checks", opts.intensity)
 end
 
 main(arg)
