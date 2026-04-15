@@ -297,6 +297,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     local vTostr           = vn()  -- alias for tostring
     local vTypefn          = vn()  -- alias for type
     local vPcallfn         = vn()  -- alias for pcall
+    local vPayload         = vn()  -- encrypted payload table variable name (randomized)
 
     -- Helper: emit an obfuscated integer expression using the runtime bXor function
     -- so no ~ operator appears in the generated output (Luau/Lua 5.1 compatible).
@@ -575,7 +576,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     -- (intentionally omitted for compact output)
 
     -- ── \N-escaped payload table at the top (emitted before do block) ─────────
-    src[#src+1] = PAYLOAD_VAR_NAME .. "={" .. table.concat(blob_chunks, ",") .. "};\n"
+    src[#src+1] = vPayload .. "={" .. table.concat(blob_chunks, ",") .. "};\n"
 
     -- Wrap all VM internals in a do...end block so locals don't pollute global scope
     L("do")
@@ -1167,8 +1168,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     LF("  local _out={};for _i=1,8 do local _w=%s[_i];_out[_i]=string.char(_w//16777216,(_w//65536)%%256,(_w//256)%%256,_w%%256) end;return table.concat(_out)", shaH)
     LF("end")
     -- Concatenate payload chunks and read into vBlob (binary AES-encrypted blob)
-    LF("local %s=table.concat(%s)", vBlob, PAYLOAD_VAR_NAME)
-    LF("%s=nil", PAYLOAD_VAR_NAME)   -- wipe payload after decoding
+    LF("local %s=table.concat(%s)", vBlob, vPayload)
+    LF("%s=nil", vPayload)   -- wipe payload after decoding
     -- SHA-256 integrity check: compute hash and compare 8 words
     LF("local %s=%s(%s)", atSha, shaFn, vBlob)
     local sha_checks = {}
@@ -1403,18 +1404,67 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
        vExec, vProto, vEnv)
     L("end")
 
-    -- ── Compact post-processing: strip indentation and join lines ────────────
-    local full = table.concat(src)
-    local compact_lines = {}
-    for line in full:gmatch("[^\n]+") do
-        -- Strip leading whitespace, then strip trailing whitespace separately
-        local trimmed = line:match("^%s*(.+)$")        if trimmed then
-            trimmed = trimmed:match("^(.-)%s*$")
-        end
+    -- ── Bootstrap XOR-encode + compact ────────────────────────────────────────
+    -- src[1] is the payload table declaration (emitted as-is, stays visible as global).
+    -- src[2..end] is the entire VM body – compact it, XOR-encode it, and wrap it
+    -- in a tiny Luau-compatible loader so no bootstrap source leaks as plaintext.
+    local payload_decl = src[1]   -- "<vPayload>={...};\n"
+    local vm_full = table.concat(src, "", 2)
+    local vm_lines = {}
+    for line in vm_full:gmatch("[^\n]+") do
+        local trimmed = line:match("^%s*(.+)$")
+        if trimmed then trimmed = trimmed:match("^(.-)%s*$") end
         if trimmed and trimmed ~= "" then
-            compact_lines[#compact_lines + 1] = trimmed
+            vm_lines[#vm_lines + 1] = trimmed
         end
     end
+    local vm_compact = table.concat(vm_lines, " ")
+
+    -- XOR-encode the compact VM source with a random 1-byte key so no bootstrap
+    -- structure, error strings, or operator source literals appear in plaintext.
+    local bs_key = math.random(1, 255)
+
+    -- Build a 256-byte lookup-table for decoding (avoids ~ operator: Luau-safe).
+    -- decode_tbl[i+1] = chr(i XOR bs_key); at runtime: decode[enc_byte+1] = src_byte.
+    local decode_tbl = {}
+    for i = 0, 255 do decode_tbl[i+1] = string.char(i ~ bs_key) end
+    local decode_str = utils.to_escape(table.concat(decode_tbl))
+
+    -- XOR-encode each byte of the compact VM source.
+    local enc_bytes = {}
+    for i = 1, #vm_compact do enc_bytes[i] = vm_compact:byte(i) ~ bs_key end
+
+    -- Split encoded bytes into string.char() chunks of 200 (Lua register-limit safe).
+    -- Use a table constructor {chunk1, chunk2, ...} joined with table.concat() at
+    -- runtime; this avoids the register-limit hit from a long `..` concatenation chain.
+    local BS_CHUNK = 200
+    local enc_parts = {}
+    for i = 1, #enc_bytes, BS_CHUNK do
+        local chunk = {}
+        for j = i, math.min(i + BS_CHUNK - 1, #enc_bytes) do
+            chunk[#chunk + 1] = tostring(enc_bytes[j])
+        end
+        enc_parts[#enc_parts + 1] = "string.char(" .. table.concat(chunk, ",") .. ")"
+    end
+    -- Table-constructor expression: {chunk1, chunk2, ...}  decoded via table.concat at runtime.
+    local enc_expr = "{" .. table.concat(enc_parts, ",") .. "}"
+
+    -- Tiny outer bootstrap loader (pure Lua 5.1+/Luau, no bitwise operators):
+    -- look up each encoded byte in the XOR decode table, then execute via load().
+    -- The decoded VM body sees the payload global (vPayload) still in scope.
+    local loader_src = string.format(
+        "(function()" ..
+        "local _L=(type(load)=='function' and load)or(type(loadstring)=='function' and loadstring);" ..
+        "if not _L then return end;" ..
+        "local _xt=\"%s\";" ..
+        "local _et=%s;" ..
+        "local _e=table.concat(_et);" ..
+        "local _d={};" ..
+        "for _i=1,#_e do _d[_i]=string.char(_xt:byte(_e:byte(_i)+1)) end;" ..
+        "_L(table.concat(_d))()" ..
+        "end)()",
+        decode_str, enc_expr)
+
     -- Prepend header block comment (Luarmor-style)
     local watermark = "--[[\n"
         .. "        Catify -- Lua script protector.\n"
@@ -1422,7 +1472,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
         .. "        https://github.com/francyw22/catify\n"
         .. "\n"
         .. "]]\n"
-    return watermark .. table.concat(compact_lines, " ")
+    return watermark .. payload_decl .. loader_src
 end
 
 return VmGen
