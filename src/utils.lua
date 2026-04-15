@@ -248,7 +248,7 @@ function Utils.obfuscate_int_deep(n, xorname)
     -- XOR split: let a = random, b = a XOR n → a XOR b == n
     local a = math.random(0, 0x3FFFFFFF)
     local b = a ~ n   -- computed at generator time (generator runs Lua 5.3)
-    local form = math.random(1, 4)
+    local form = math.random(1, 7)
     if xorname then
         -- Emit function-call syntax so the output is valid in all Lua versions
         if form == 1 then
@@ -262,11 +262,25 @@ function Utils.obfuscate_int_deep(n, xorname)
             -- Noise around result: xor(a,b)+p-p
             local p = math.random(1, 0x7FFF)
             return string.format("((%s(%d,%d))+%d-%d)", xorname, a, b, p, p)
-        else
+        elseif form == 4 then
             -- Double-cancel noise: xor(a,b)+p+q-p-q
             local p = math.random(1, 0x7FFF)
             local q = math.random(1, 0x7FFF)
             return string.format("((%s(%d,%d))+%d+%d-%d-%d)", xorname, a, b, p, q, p, q)
+        elseif form == 5 then
+            -- Cancelled XOR shell around the split.
+            local p = math.random(0, 0x3FFFFFFF)
+            return string.format("(%s(%s(%d,%d),%s(%d,%d)))", xorname, xorname, a, b, xorname, p, p)
+        elseif form == 6 then
+            -- Independent split + combine: xor(xor(a,b), xor(c,d))
+            local c = math.random(0, 0x3FFFFFFF)
+            local d = c
+            return string.format("(%s(%s(%d,%d),%s(%d,%d)))", xorname, xorname, a, b, xorname, c, d)
+        else
+            -- Extra arithmetic shell with nested no-op XOR.
+            local p = math.random(1, 0x3FFF)
+            local q = math.random(0, 0x3FFFFFFF)
+            return string.format("((%s(%d,%d))+(%s(%d,%d))+%d-%d)", xorname, a, b, xorname, q, q, p, p)
         end
     else
         -- No xorname: pre-compute XOR and use arithmetic-only noise
@@ -279,10 +293,21 @@ function Utils.obfuscate_int_deep(n, xorname)
         elseif form == 3 then
             local p = math.random(1, 0x7FFF)
             return string.format("(%d-%d+%d)", result, p, p)
-        else
+        elseif form == 4 then
             local p = math.random(1, 0x7FFF)
             local q = math.random(1, 0x7FFF)
             return string.format("(%d+%d+%d-%d-%d)", result, p, q, p, q)
+        elseif form == 5 then
+            local p = math.random(1, 0x3FFF)
+            local q = math.random(1, 0x3FFF)
+            return string.format("((%d+%d)-(%d-%d))", result, p, q, p - q)
+        elseif form == 6 then
+            local p = math.random(1, 0x1FFF)
+            return string.format("((%d+%d)-%d)", result, p, p)
+        else
+            local p = math.random(1, 0x3FFF)
+            local q = math.random(1, 0x3FFF)
+            return string.format("((%d-%d)+(%d+%d))", result, p, q, p - q)
         end
     end
 end

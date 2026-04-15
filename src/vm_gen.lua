@@ -258,6 +258,10 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local atSha     = vn()
     -- Watermark variable name
     local vWm       = vn()
+    -- Bootstrap helper aliases
+    local bsToStr   = vn()
+    local bsType    = vn()
+    local bsPcall   = vn()
     -- decoy function names
     local vDecoy    = vn()   -- decoy function (defined, never called)
     local dkA       = vn()
@@ -297,7 +301,19 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
 
     -- Helper: emit an obfuscated integer expression using the runtime bXor function
     -- so no ~ operator appears in the generated output (Luau/Lua 5.1 compatible).
-    local function _obfInt(n) return utils.obfuscate_int_deep(n, bXor) end
+    local function _obfInt(n)
+        local mode = math.random(1, 5)
+        if mode == 1 then
+            return utils.obfuscate_int_deep(n, bXor)
+        elseif mode == 2 then
+            return utils.obfuscate_int_triple(n, bXor)
+        elseif mode == 3 then
+            return utils.obfuscate_int_deep(n)
+        elseif mode == 4 then
+            return utils.obfuscate_int_triple(n)
+        end
+        return utils.obfuscate_int(n)
+    end
 
     -- ── 3. Compute SHA-256 of the encrypted blob for anti-tamper ─────────────
     local blob_sha = utils.sha256(blob)
@@ -467,7 +483,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
 
     -- Wrap all VM internals in a do...end block so locals don't pollute global scope
     L("do")
-    L("local _=tostring;local __=type;local ___=pcall")
+    LF("local %s=tostring;local %s=type;local %s=pcall", bsToStr, bsType, bsPcall)
     LF("local %s=(type(load)=='function' and load) or (type(loadstring)=='function' and loadstring) or nil", vLoadCompat)
     LF("local %s=(table and table.pack) or function(...) return {n=select('#', ...),...} end", vPack)
     LF("local %s=(table and table.unpack) or unpack", vUnpack)
@@ -1094,7 +1110,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Each anti-tamper check is stored as XOR-encoded bytes; this helper
     -- decodes them at runtime and executes them via load() so that none of
     -- the check logic (error strings, API names) appears as readable text.
-    LF("local function %s(_e,_m) if type(%s)~='function' then return end local _t={} for _i=1,#_e do _t[_i]=string.char(%s(_e:byte(_i),_m)) end local _f=%s(table.concat(_t));if type(_f)=='function' then _f() end end", vAtExec, vLoadCompat, bXor, vLoadCompat)
+    LF("local function %s(_e,_m) if type(%s)~='function' then error('Catify: anti-tamper loader missing',0) end local _t={} for _i=1,#_e do _t[_i]=string.char(%s(_e:byte(_i),_m)) end local _f,_fe=%s(table.concat(_t));if type(_f)~='function' then error('Catify: anti-tamper load failed '..tostring(_fe),0) end local _ok,_er=pcall(_f);if not _ok then error(_er,0) end end", vAtExec, vLoadCompat, bXor, vLoadCompat)
 
     -- Lua-level helper: XOR-encode `code_str` with a random byte mask and
     -- emit a call to vAtExec(encoded_string, mask) into the generated source.
@@ -1132,41 +1148,29 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     at_load("do local _t={rawequal,rawget,rawset,select,ipairs,pairs,next,table.unpack or unpack};if rawlen~=nil then _t[#_t+1]=rawlen end;for _,_f in ipairs(_t) do if type(_f)~='function' then error('Catify: environment tampered (core)',0) end end end")
 
     -- Anti-tamper 6: type() sanity (standard type names must not be overridden)
-    if math.random(1, 2) == 1 then
-        at_load("do if type(nil)~='nil' or type(0)~='number' or type('')~='string' or type({})~='table' or type(type)~='function' then error('Catify: environment tampered (type)',0) end end")
-    end
+    at_load("do if type(nil)~='nil' or type(0)~='number' or type('')~='string' or type({})~='table' or type(type)~='function' then error('Catify: environment tampered (type)',0) end end")
 
     -- Anti-tamper 7: string standard library sanity
     at_load("do if string.byte('A')~=65 or string.char(65)~='A' or string.len('ab')~=2 then error('Catify: environment tampered (strlib)',0) end end")
 
     -- Anti-tamper 8: math library sanity (math.pi is universal; maxinteger absent in Luau)
-    if math.random(1, 2) == 1 then
-        at_load("do if type(math.pi)~='number' or math.pi<=3 or math.pi>=4 or type(math.abs)~='function' then error('Catify: environment tampered (math)',0) end end")
-    end
+    at_load("do if type(math.pi)~='number' or math.pi<=3 or math.pi>=4 or type(math.abs)~='function' then error('Catify: environment tampered (math)',0) end end")
 
     -- Anti-tamper 9: table library sanity (insert/remove must be callable)
-    if math.random(1, 2) == 1 then
-        at_load("do if type(table.insert)~='function' or type(table.remove)~='function' or type(table.concat)~='function' then error('Catify: environment tampered (tablelib)',0) end end")
-    end
+    at_load("do if type(table.insert)~='function' or type(table.remove)~='function' or type(table.concat)~='function' then error('Catify: environment tampered (tablelib)',0) end end")
 
     -- Anti-tamper 10: coroutine library basic check
-    if math.random(1, 2) == 1 then
-        at_load("do if type(coroutine)~='table' or type(coroutine.wrap)~='function' then error('Catify: environment tampered (coroutine)',0) end end")
-    end
+    at_load("do if type(coroutine)~='table' or type(coroutine.wrap)~='function' then error('Catify: environment tampered (coroutine)',0) end end")
 
     -- Anti-keylogger 1: no active debug hook (self-contained, more thorough check)
     at_load(string.format("do local _k;pcall(function() local _ce=%s;local _d=(type(_ce)=='table' and rawget(_ce,'debug')) or nil;if _d and type(_d.gethook)=='function' then _k=_d.gethook() end end);if _k~=nil then error('Catify: keylogger detected',0) end end", env_expr))
 
     -- Anti-keylogger 2: io library integrity (keyloggers may replace io.read/write)
     -- io is nil in Roblox, so the nil guard makes this a no-op there.
-    if math.random(1, 2) == 1 then
-        at_load(string.format("do local _ce=%s;local _io=(type(_ce)=='table' and rawget(_ce,'io')) or nil;if _io~=nil and(type(_io.read)~='function' or type(_io.write)~='function')then error('Catify: keylogger detected (io)',0)end end", env_expr))
-    end
+    at_load(string.format("do local _ce=%s;local _io=(type(_ce)=='table' and rawget(_ce,'io')) or nil;if _io~=nil and(type(_io.read)~='function' or type(_io.write)~='function')then error('Catify: keylogger detected (io)',0)end end", env_expr))
 
     -- Anti-keylogger 3: string metatable not tampered
-    if math.random(1, 2) == 1 then
-        at_load("do local _m=getmetatable('');if type(_m)=='table' then local _idx=rawget(_m,'__index');if _idx~=nil and type(_idx)~='table' then error('Catify: keylogger detected (strmeta)',0)end end end")
-    end
+    at_load("do local _m=getmetatable('');if type(_m)=='table' then local _idx=rawget(_m,'__index');if _idx~=nil and type(_idx)~='table' then error('Catify: keylogger detected (strmeta)',0)end end end")
 
     -- Anti-keylogger 4: pcall/error uncompromised
     at_load("do local _ok,_r=pcall(function()return true end);if not _ok or _r~=true then error('Catify: keylogger detected (pcall)',0)end end")
@@ -1178,14 +1182,10 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Anti-environmental logger 2: os library integrity check.
     -- Roblox has os.time and os.clock but NOT os.getenv, so we only check
     -- the two functions that are guaranteed to exist on all supported platforms.
-    if math.random(1, 2) == 1 then
-        at_load(string.format("do local _ce=%s;local _os=(type(_ce)=='table' and rawget(_ce,'os')) or nil;if _os~=nil then if type(_os.time)~='function' or type(_os.clock)~='function' then error('Catify: env tampered (os)',0)end end end", env_expr))
-    end
+    at_load(string.format("do local _ce=%s;local _os=(type(_ce)=='table' and rawget(_ce,'os')) or nil;if _os~=nil then if type(_os.time)~='function' or type(_os.clock)~='function' then error('Catify: env tampered (os)',0)end end end", env_expr))
 
     -- Anti-environmental logger 3: numbers must not have a metatable (some loggers patch this)
-    if math.random(1, 2) == 1 then
-        at_load("do local _m=getmetatable(0);if _m~=nil then error('Catify: env logger detected (nummt)',0)end end")
-    end
+    at_load("do local _m=getmetatable(0);if _m~=nil then error('Catify: env logger detected (nummt)',0)end end")
 
     -- Watermark: obfuscated ASCII cat watermark (sits in memory, never printed)
     local wm_bytes = {32,32,47,92,95,47,92,32,32,10,32,40,111,46,111,32,41,10,32,32,62,32,94,32,60,10,32,67,97,116,105,102,121,32,118,50,46,48}
