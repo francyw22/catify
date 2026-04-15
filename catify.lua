@@ -44,10 +44,10 @@ local BANNER = [[
 
 -- Intensity → junk cluster count ranges
 local INTENSITY_RANGES = {
-    [0] = { min=1,  max=4  },
-    [1] = { min=5,  max=14 },
-    [2] = { min=12, max=24 },
-    [3] = { min=20, max=40 },
+    [0] = { min=2,  max=6  },
+    [1] = { min=10, max=24 },
+    [2] = { min=24, max=52 },
+    [3] = { min=48, max=96 },
 }
 
 -- ─── Argument parsing ─────────────────────────────────────────────────────────
