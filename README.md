@@ -19,6 +19,7 @@ heavily protected VM bytecode — matching the `superflow_bytecode` format used 
 | **Environment check** | Verifies critical globals and detects common env/logger hook patterns |
 | **Junk injection** | Dead-code statements sprinkled throughout the VM dispatch loop |
 | **ASCII cat watermark** | Obfuscated watermark string embedded in generated output |
+| **Roblox tiny loader** | `--roblox` now emits one compact line and stores `key`/`nonce` in Base91 (decoded at runtime) |
 
 ---
 

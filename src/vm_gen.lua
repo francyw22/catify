@@ -322,40 +322,18 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
         local function H(s) out[#out+1] = s .. "\n" end
         local function HF(fmt, ...) H(string.format(fmt, ...)) end
 
-        -- Watermark header
-        H("--[[")
-        H("        Catify -- Lua script protector.")
-        H(" this code runs & decrypts & executes protected Lua scripts")
-        H("]]")
-
         -- Payload table (encrypted bytecode chunks, same format as full mode)
         local payload_var = utils.rand_name(4, 8)
         out[#out+1] = "local " .. payload_var .. "={" .. table.concat(blob_chunks, ",") .. "}\n"
 
-        -- Config table: key/nonce split into XOR-masked chunks for obfuscation,
+        -- Config table: key/nonce in Base91 and decoded at runtime,
         -- sha-256 integrity words, sxor byte, and shuffled→real opcode revmap.
         local cfg_var = utils.rand_name(4, 8)
-
-        -- Key: 4 chunks of 8 bytes, each pre-XOR'd with a random per-chunk mask.
-        local km = { math.random(1,255), math.random(1,255), math.random(1,255), math.random(1,255) }
-        local key_parts = {}
-        for chunk = 0, 3 do
-            local t = {}
-            for bi = 1, 8 do
-                t[bi] = tostring(key:byte(chunk*8 + bi) ~ km[chunk+1])
-            end
-            key_parts[chunk+1] = string.format("string.char(%s)", table.concat(t, ","))
-        end
-        -- Nonce: 2 chunks of 4 bytes.
-        local nm = { math.random(1,255), math.random(1,255) }
-        local nonce_parts = {}
-        for chunk = 0, 1 do
-            local t = {}
-            for bi = 1, 4 do
-                t[bi] = tostring(nonce:byte(chunk*4 + bi) ~ nm[chunk+1])
-            end
-            nonce_parts[chunk+1] = string.format("string.char(%s)", table.concat(t, ","))
-        end
+        local key_b91 = utils.base91_enc(key)
+        local nonce_b91 = utils.base91_enc(nonce)
+        local b91_alpha_lit = string.format("%q", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,./:;<=>?@[]^_`{|}~\"")
+        local key_b91_lit = string.format("%q", key_b91)
+        local nonce_b91_lit = string.format("%q", nonce_b91)
 
         -- SHA-256 expected words
         local sha_entries = {}
@@ -367,30 +345,225 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
             rm_entries[shuffled+1] = tostring(revmap[shuffled] or 0)
         end
 
-        -- Emit config table
-        HF("local %s={", cfg_var)
-        -- Reconstructed key: unmask chunks at runtime
-        HF("  key=(function()")
-        HF("    local _t={}")
-        for chunk = 0, 3 do
-            HF("    local _m=%d;for _j=1,8 do _t[%d+_j]=string.char((%s):byte(_j)~_m)end",
-               km[chunk+1], chunk*8, key_parts[chunk+1])
+        -- Helper (at generation time): XOR-encode a string with a random mask,
+        -- producing a string.char(...) literal and the mask used.
+        local function xor_field(s)
+            local mask = math.random(1, 255)
+            local bytes = {}
+            for i = 1, #s do bytes[i] = tostring(s:byte(i) ~ mask) end
+            return string.format("string.char(%s)", table.concat(bytes, ",")), mask
         end
-        HF("    return table.concat(_t)")
-        HF("  end)(),")
-        -- Reconstructed nonce
-        HF("  nonce=(function()")
-        HF("    local _t={}")
-        for chunk = 0, 1 do
-            HF("    local _m=%d;for _j=1,4 do _t[%d+_j]=string.char((%s):byte(_j)~_m)end",
-               nm[chunk+1], chunk*4, nonce_parts[chunk+1])
+
+        -- Pre-encode every CFG field name so that the literal strings "key",
+        -- "nonce", "sxor", "sha", "revmap" never appear in the generated output.
+        local kf_enc,  kf_mask  = xor_field("key")
+        local nf_enc,  nf_mask  = xor_field("nonce")
+        local sf_enc,  sf_mask  = xor_field("sxor")
+        local shf_enc, shf_mask = xor_field("sha")
+        local rmf_enc, rmf_mask = xor_field("revmap")
+
+        -- ── Junk dead-code blocks (~110 KB total) ──────────────────────────────
+        -- Each block is a self-contained `do local _X={N1,N2,...} end` that
+        -- allocates and immediately discards a large random-number table.
+        -- Blocks are syntactically valid Lua and never affect execution.
+        -- Number of entries per block and number of blocks are tuned so that
+        -- the collapsed single-line output grows by ≥100 KB.
+        local JUNK_BLOCKS   = 9
+        local JUNK_PER_BLOCK = 2000   -- numeric entries per table (~12 KB each)
+        for _jb = 1, JUNK_BLOCKS do
+            local jname = utils.rand_name(6, 12)
+            local entries = {}
+            for _je = 1, JUNK_PER_BLOCK do
+                entries[_je] = tostring(math.random(0, 999999999))
+            end
+            H("do local " .. jname .. "={" .. table.concat(entries, ",") .. "} end")
         end
-        HF("    return table.concat(_t)")
-        HF("  end)(),")
-        HF("  sxor=%d,", sxor_byte)
-        HF("  sha={[0]=%s},", table.concat(sha_entries, ","))
-        HF("  revmap={[0]=%s},", table.concat(rm_entries, ","))
-        H("}")
+
+        -- ── Runtime helper functions ────────────────────────────────────────────
+
+        -- Base91 decoder for key/nonce (emitted into the output script).
+        HF("local function _b91d(_s)")
+        HF("  local _a=%s", b91_alpha_lit)
+        HF("  local _m={}")
+        HF("  for _i=1,#_a do _m[_a:byte(_i)]=_i-1 end")
+        HF("  local _v,_b,_n=-1,0,0")
+        HF("  local _o={}")
+        HF("  for _i=1,#_s do")
+        HF("    local _p=_m[_s:byte(_i)]")
+        HF("    if _p~=nil then")
+        HF("      if _v<0 then")
+        HF("        _v=_p")
+        HF("      else")
+        HF("        _v=_v+_p*91")
+        HF("        _b=_b+(_v*(2^_n))")
+        HF("        if (_v%%8192)>88 then _n=_n+13 else _n=_n+14 end")
+        HF("        while _n>7 do _o[#_o+1]=string.char(_b%%256); _b=math.floor(_b/256); _n=_n-8 end")
+        HF("        _v=-1")
+        HF("      end")
+        HF("    end")
+        HF("  end")
+        HF("  if _v>-1 then _o[#_o+1]=string.char((_b+_v*(2^_n))%%256) end")
+        HF("  return table.concat(_o)")
+        H("end")
+
+        -- XOR field-name decoder: _sk(encoded_bytes, mask) → plain string.
+        -- Used to reconstruct "key","nonce","sxor","sha","revmap" at runtime
+        -- without those literal strings appearing anywhere in the generated code.
+        H("local function _sk(_x,_m) local _t={} for _i=1,#_x do _t[_i]=string.char(_x:byte(_i)~_m) end return table.concat(_t) end")
+
+        -- ── Emit config table via polymorphic field-assignment patterns ────────
+        -- The cfg table fields (key, nonce, sxor, sha, revmap) are set using
+        -- 15 structurally-distinct patterns so no two consecutive assignments look
+        -- alike.  Every pattern hides the field name via _sk().
+        HF("local %s={}", cfg_var)
+
+        -- Pool of structurally-distinct field-assignment emitters.
+        -- Each returns a complete Lua statement string that sets tbl[name]=val.
+        local _fe = {
+            -- 1: do-block — local for key, then bracket assign.
+            function(tbl, kexpr, vexpr)
+                local lk = utils.rand_name(4, 8)
+                return string.format("do local %s=%s; %s[%s]=%s end", lk, kexpr, tbl, lk, vexpr)
+            end,
+            -- 2: rawset(tbl, key, val) — no bracket indexing visible.
+            function(tbl, kexpr, vexpr)
+                return string.format("rawset(%s,%s,%s)", tbl, kexpr, vexpr)
+            end,
+            -- 3: IIFE key — (function() return key end)() used as index.
+            function(tbl, kexpr, vexpr)
+                return string.format("%s[(function() return %s end)()]=%s", tbl, kexpr, vexpr)
+            end,
+            -- 4: do-block — local for value first, key decoded inline.
+            function(tbl, kexpr, vexpr)
+                local lv = utils.rand_name(4, 8)
+                return string.format("do local %s=%s; %s[%s]=%s end", lv, vexpr, tbl, kexpr, lv)
+            end,
+            -- 5: do-block — two separate locals (key then value) then assign.
+            function(tbl, kexpr, vexpr)
+                local lk = utils.rand_name(4, 8)
+                local lv = utils.rand_name(4, 8)
+                return string.format("do local %s=%s; local %s=%s; %s[%s]=%s end",
+                    lk, kexpr, lv, vexpr, tbl, lk, lv)
+            end,
+            -- 6: select-wrapper — select(1, val) strips vararg, rawset with it.
+            function(tbl, kexpr, vexpr)
+                local lk = utils.rand_name(4, 8)
+                return string.format("do local %s=%s; rawset(%s,%s,(select(1,%s))) end",
+                    lk, kexpr, tbl, lk, vexpr)
+            end,
+            -- 7: table.pack then unpack the single value via [1].
+            function(tbl, kexpr, vexpr)
+                local lk = utils.rand_name(4, 8)
+                local lp = utils.rand_name(4, 8)
+                return string.format("do local %s=%s; local %s=table.pack(%s); %s[%s]=%s[1] end",
+                    lk, kexpr, lp, vexpr, tbl, lk, lp)
+            end,
+            -- 8: pcall wrapper — pcall(rawset, tbl, key, val) always succeeds.
+            function(tbl, kexpr, vexpr)
+                return string.format("pcall(rawset,%s,%s,%s)", tbl, kexpr, vexpr)
+            end,
+            -- 9: IIFE value — value produced inside an immediately-called closure.
+            function(tbl, kexpr, vexpr)
+                return string.format("%s[%s]=(function() return %s end)()", tbl, kexpr, vexpr)
+            end,
+            -- 10: nested do-blocks — outer holds key, inner assigns.
+            function(tbl, kexpr, vexpr)
+                local lk = utils.rand_name(4, 8)
+                return string.format("do local %s=%s do %s[%s]=%s end end", lk, kexpr, tbl, lk, vexpr)
+            end,
+            -- 11: coroutine.wrap IIFE for the value — exotic call shape.
+            function(tbl, kexpr, vexpr)
+                local lk = utils.rand_name(4, 8)
+                return string.format(
+                    "do local %s=%s; %s[%s]=coroutine.wrap(function() coroutine.yield(%s) end)() end",
+                    lk, kexpr, tbl, lk, vexpr)
+            end,
+            -- 12: or-guard form — key decoded into local; rawset inside assert.
+            function(tbl, kexpr, vexpr)
+                local lk = utils.rand_name(4, 8)
+                return string.format("do local %s=%s; assert(rawset(%s,%s,%s)) end",
+                    lk, kexpr, tbl, lk, vexpr)
+            end,
+            -- 13: local fn alias for rawset, then call it.
+            function(tbl, kexpr, vexpr)
+                local lf = utils.rand_name(4, 8)
+                return string.format("do local %s=rawset; %s(%s,%s,%s) end",
+                    lf, lf, tbl, kexpr, vexpr)
+            end,
+            -- 14: key+value both in locals inside do; assign via rawset.
+            function(tbl, kexpr, vexpr)
+                local lk = utils.rand_name(4, 8)
+                local lv = utils.rand_name(4, 8)
+                return string.format("do local %s=%s; local %s=%s; rawset(%s,%s,%s) end",
+                    lk, kexpr, lv, vexpr, tbl, lk, lv)
+            end,
+            -- 15: IIFE wraps both key and val; rawset inside.
+            function(tbl, kexpr, vexpr)
+                return string.format("(function(_k,_v) rawset(%s,_k,_v) end)(%s,%s)",
+                    tbl, kexpr, vexpr)
+            end,
+            -- 16: if true then guard — hides assignment inside dead-looking branch.
+            function(tbl, kexpr, vexpr)
+                local lk = utils.rand_name(4, 8)
+                return string.format("if true then local %s=%s; %s[%s]=%s end",
+                    lk, kexpr, tbl, lk, vexpr)
+            end,
+            -- 17: repeat-until-true — single-iteration loop.
+            function(tbl, kexpr, vexpr)
+                local lk = utils.rand_name(4, 8)
+                return string.format("repeat local %s=%s; %s[%s]=%s until true",
+                    lk, kexpr, tbl, lk, vexpr)
+            end,
+            -- 18: three nested locals — decoy re-assignment before final write.
+            function(tbl, kexpr, vexpr)
+                local la = utils.rand_name(4, 8)
+                local lb = utils.rand_name(4, 8)
+                local lk = utils.rand_name(4, 8)
+                return string.format(
+                    "do local %s=%s; local %s=%s; local %s=%s; %s[%s]=%s end",
+                    la, vexpr, lb, kexpr, lk, lb, tbl, lk, la)
+            end,
+            -- 19: rawset via a table.pack that discards count field.
+            function(tbl, kexpr, vexpr)
+                local lk = utils.rand_name(4, 8)
+                local lp = utils.rand_name(4, 8)
+                return string.format(
+                    "do local %s=%s; local %s=table.pack(%s); %s.n=nil; rawset(%s,%s,%s[1]) end",
+                    lk, kexpr, lp, vexpr, lp, tbl, lk, lp)
+            end,
+            -- 20: IIFE for key AND value, passed to rawset inside the call.
+            function(tbl, kexpr, vexpr)
+                return string.format(
+                    "(function() rawset(%s,(function() return %s end)(),(function() return %s end)()) end)()",
+                    tbl, kexpr, vexpr)
+            end,
+        }
+
+        -- Emit each field with a different variant (no two consecutive fields
+        -- share the same pattern index).
+        local _last_fe = 0
+        local function emit_cfg_field(kexpr, vexpr)
+            local idx
+            repeat idx = math.random(1, #_fe) until idx ~= _last_fe
+            _last_fe = idx
+            H(_fe[idx](cfg_var, kexpr, vexpr))
+        end
+
+        emit_cfg_field(
+            string.format("_sk(%s,%d)", kf_enc,  kf_mask),
+            string.format("_b91d(%s)", key_b91_lit))
+        emit_cfg_field(
+            string.format("_sk(%s,%d)", nf_enc,  nf_mask),
+            string.format("_b91d(%s)", nonce_b91_lit))
+        emit_cfg_field(
+            string.format("_sk(%s,%d)", sf_enc,  sf_mask),
+            tostring(sxor_byte))
+        emit_cfg_field(
+            string.format("_sk(%s,%d)", shf_enc, shf_mask),
+            string.format("{[0]=%s}", table.concat(sha_entries, ",")))
+        emit_cfg_field(
+            string.format("_sk(%s,%d)", rmf_enc, rmf_mask),
+            string.format("{[0]=%s}", table.concat(rm_entries, ",")))
 
         -- HTTP loader (Roblox game:HttpGet)
         -- Runtime URL: split into masked chunks so the plain URL never appears literally.
@@ -438,7 +611,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
         H("end)")
         HF("if not %s then error('Catify: failed to load runtime - '..tostring(%s),0) end", ok_var, err_var)
 
-        return table.concat(out)
+        return (table.concat(out):gsub("[\r\n]+", " "))
     end
     -- ── End HTTP-runtime mode ─────────────────────────────────────────────────
 
