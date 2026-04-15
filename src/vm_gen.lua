@@ -326,7 +326,6 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
         H("--[[")
         H("        Catify -- Lua script protector.")
         H(" this code runs & decrypts & executes protected Lua scripts")
-        H("        https://github.com/francyw22/catify")
         H("]]")
 
         -- Payload table (encrypted bytecode chunks, same format as full mode)
@@ -394,10 +393,41 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
         H("}")
 
         -- HTTP loader (Roblox game:HttpGet)
+        -- Runtime URL: split into masked chunks so the plain URL never appears literally.
+        local url_chunks, url_masks = {}, {}
+        local url_chunk_size = 7
+        for i = 1, #http_url, url_chunk_size do
+            local chunk = http_url:sub(i, i + url_chunk_size - 1)
+            local mask = math.random(1, 255)
+            local bytes = {}
+            for j = 1, #chunk do
+                bytes[#bytes+1] = tostring(chunk:byte(j) ~ mask)
+            end
+            url_masks[#url_masks+1] = mask
+            url_chunks[#url_chunks+1] = string.format("string.char(%s)", table.concat(bytes, ","))
+        end
+
         local ok_var = utils.rand_name(4, 8)
         local err_var = utils.rand_name(4, 8)
         HF("local %s,%s=pcall(function()", ok_var, err_var)
-        HF("  local _src=game:HttpGet(%q,true)", http_url)
+        HF("  local _u=(function()")
+        HF("    local _ut={}")
+        for idx = 1, #url_chunks do
+            HF("    do local _m=%d; local _c=%s; for _j=1,#_c do _ut[#_ut+1]=string.char(_c:byte(_j)~_m) end end",
+                url_masks[idx], url_chunks[idx])
+        end
+        HF("    return table.concat(_ut)")
+        HF("  end)()")
+        HF("  do")
+        HF("    local _jn={}")
+        HF("    local _sx=0")
+        HF("    for _i=1,17 do")
+        HF("      _jn[_i]=((_i*37)+13)%%256")
+        HF("      _sx=(_sx+(_jn[_i]~(_i*11)))%%65536")
+        HF("    end")
+        HF("    if _sx==65537 then error('Catify: invalid runtime probe',0) end")
+        HF("  end")
+        HF("  local _src=game:HttpGet(_u,true)")
         HF("  local _L=(type(loadstring)=='function' and loadstring) or (type(load)=='function' and load)")
         HF("  if type(_L)~='function' then error('Catify: load/loadstring unavailable',0) end")
         HF("  local _chunk,_cerr=_L(_src)")
@@ -1571,7 +1601,6 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
     local watermark = "--[[\n"
         .. "        Catify -- Lua script protector.\n"
         .. " this code runs & decrypts & executes protected Lua scripts\n"
-        .. "        https://github.com/francyw22/catify\n"
         .. "\n"
         .. "]]\n"
     return watermark .. payload_decl .. loader_src
