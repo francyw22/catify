@@ -413,37 +413,129 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
 
         -- ── Emit config table via polymorphic field-assignment patterns ────────
         -- The cfg table fields (key, nonce, sxor, sha, revmap) are set using
-        -- 5 structurally-distinct patterns so consecutive assignments never look
-        -- alike.  Every pattern still hides the field name via _sk().
+        -- 15 structurally-distinct patterns so no two consecutive assignments look
+        -- alike.  Every pattern hides the field name via _sk().
         HF("local %s={}", cfg_var)
 
         -- Pool of structurally-distinct field-assignment emitters.
-        -- Each returns a complete Lua statement string that sets cfg[name]=val.
+        -- Each returns a complete Lua statement string that sets tbl[name]=val.
         local _fe = {
-            -- A: do-block, local holds the decoded field name, then assign.
+            -- 1: do-block — local for key, then bracket assign.
             function(tbl, kexpr, vexpr)
-                local ln = utils.rand_name(4, 8)
-                return string.format("do local %s=%s; %s[%s]=%s end", ln, kexpr, tbl, ln, vexpr)
+                local lk = utils.rand_name(4, 8)
+                return string.format("do local %s=%s; %s[%s]=%s end", lk, kexpr, tbl, lk, vexpr)
             end,
-            -- B: rawset(tbl, decoded_key, value) — no visible indexing at all.
+            -- 2: rawset(tbl, key, val) — no bracket indexing visible.
             function(tbl, kexpr, vexpr)
                 return string.format("rawset(%s,%s,%s)", tbl, kexpr, vexpr)
             end,
-            -- C: IIFE that returns the key; assigned with normal [] syntax.
+            -- 3: IIFE key — (function() return key end)() used as index.
             function(tbl, kexpr, vexpr)
                 return string.format("%s[(function() return %s end)()]=%s", tbl, kexpr, vexpr)
             end,
-            -- D: do-block, local holds the value first, then the key is decoded inline.
+            -- 4: do-block — local for value first, key decoded inline.
             function(tbl, kexpr, vexpr)
                 local lv = utils.rand_name(4, 8)
                 return string.format("do local %s=%s; %s[%s]=%s end", lv, vexpr, tbl, kexpr, lv)
             end,
-            -- E: do-block with two separate locals for key and value before assign.
+            -- 5: do-block — two separate locals (key then value) then assign.
             function(tbl, kexpr, vexpr)
                 local lk = utils.rand_name(4, 8)
                 local lv = utils.rand_name(4, 8)
                 return string.format("do local %s=%s; local %s=%s; %s[%s]=%s end",
                     lk, kexpr, lv, vexpr, tbl, lk, lv)
+            end,
+            -- 6: select-wrapper — select(1, val) strips vararg, rawset with it.
+            function(tbl, kexpr, vexpr)
+                local lk = utils.rand_name(4, 8)
+                return string.format("do local %s=%s; rawset(%s,%s,(select(1,%s))) end",
+                    lk, kexpr, tbl, lk, vexpr)
+            end,
+            -- 7: table.pack then unpack the single value via [1].
+            function(tbl, kexpr, vexpr)
+                local lk = utils.rand_name(4, 8)
+                local lp = utils.rand_name(4, 8)
+                return string.format("do local %s=%s; local %s=table.pack(%s); %s[%s]=%s[1] end",
+                    lk, kexpr, lp, vexpr, tbl, lk, lp)
+            end,
+            -- 8: pcall wrapper — pcall(rawset, tbl, key, val) always succeeds.
+            function(tbl, kexpr, vexpr)
+                return string.format("pcall(rawset,%s,%s,%s)", tbl, kexpr, vexpr)
+            end,
+            -- 9: IIFE value — value produced inside an immediately-called closure.
+            function(tbl, kexpr, vexpr)
+                return string.format("%s[%s]=(function() return %s end)()", tbl, kexpr, vexpr)
+            end,
+            -- 10: nested do-blocks — outer holds key, inner assigns.
+            function(tbl, kexpr, vexpr)
+                local lk = utils.rand_name(4, 8)
+                return string.format("do local %s=%s do %s[%s]=%s end end", lk, kexpr, tbl, lk, vexpr)
+            end,
+            -- 11: coroutine.wrap IIFE for the value — exotic call shape.
+            function(tbl, kexpr, vexpr)
+                local lk = utils.rand_name(4, 8)
+                return string.format(
+                    "do local %s=%s; %s[%s]=coroutine.wrap(function() coroutine.yield(%s) end)() end",
+                    lk, kexpr, tbl, lk, vexpr)
+            end,
+            -- 12: or-guard form — key decoded into local; rawset inside assert.
+            function(tbl, kexpr, vexpr)
+                local lk = utils.rand_name(4, 8)
+                return string.format("do local %s=%s; assert(rawset(%s,%s,%s)) end",
+                    lk, kexpr, tbl, lk, vexpr)
+            end,
+            -- 13: local fn alias for rawset, then call it.
+            function(tbl, kexpr, vexpr)
+                local lf = utils.rand_name(4, 8)
+                return string.format("do local %s=rawset; %s(%s,%s,%s) end",
+                    lf, lf, tbl, kexpr, vexpr)
+            end,
+            -- 14: key+value both in locals inside do; assign via rawset.
+            function(tbl, kexpr, vexpr)
+                local lk = utils.rand_name(4, 8)
+                local lv = utils.rand_name(4, 8)
+                return string.format("do local %s=%s; local %s=%s; rawset(%s,%s,%s) end",
+                    lk, kexpr, lv, vexpr, tbl, lk, lv)
+            end,
+            -- 15: IIFE wraps both key and val; rawset inside.
+            function(tbl, kexpr, vexpr)
+                return string.format("(function(_k,_v) rawset(%s,_k,_v) end)(%s,%s)",
+                    tbl, kexpr, vexpr)
+            end,
+            -- 16: if true then guard — hides assignment inside dead-looking branch.
+            function(tbl, kexpr, vexpr)
+                local lk = utils.rand_name(4, 8)
+                return string.format("if true then local %s=%s; %s[%s]=%s end",
+                    lk, kexpr, tbl, lk, vexpr)
+            end,
+            -- 17: repeat-until-true — single-iteration loop.
+            function(tbl, kexpr, vexpr)
+                local lk = utils.rand_name(4, 8)
+                return string.format("repeat local %s=%s; %s[%s]=%s until true",
+                    lk, kexpr, tbl, lk, vexpr)
+            end,
+            -- 18: three nested locals — decoy re-assignment before final write.
+            function(tbl, kexpr, vexpr)
+                local la = utils.rand_name(4, 8)
+                local lb = utils.rand_name(4, 8)
+                local lk = utils.rand_name(4, 8)
+                return string.format(
+                    "do local %s=%s; local %s=%s; local %s=%s; %s[%s]=%s end",
+                    la, vexpr, lb, kexpr, lk, lb, tbl, lk, la)
+            end,
+            -- 19: rawset via a table.pack that discards count field.
+            function(tbl, kexpr, vexpr)
+                local lk = utils.rand_name(4, 8)
+                local lp = utils.rand_name(4, 8)
+                return string.format(
+                    "do local %s=%s; local %s=table.pack(%s); %s.n=nil; rawset(%s,%s,%s[1]) end",
+                    lk, kexpr, lp, vexpr, lp, tbl, lk, lp)
+            end,
+            -- 20: IIFE for key AND value, passed to rawset inside the call.
+            function(tbl, kexpr, vexpr)
+                return string.format(
+                    "(function() rawset(%s,(function() return %s end)(),(function() return %s end)()) end)()",
+                    tbl, kexpr, vexpr)
             end,
         }
 
