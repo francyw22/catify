@@ -350,7 +350,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     --  form 8: string.rep + #  identity
     --  form 9: fake config table with dead branch (looks like real init code)
     --  form 10: fake string sanitize (dead upper/lower branch)
-    --  form 11: byte-pack roundtrip identity with dead mismatch branch
+    --  form 11: byte-pack round-trip identity with dead mismatch branch
     --  form 12: deterministic accumulator fold (dead negative branch)
     --  form 13: fake checksum state machine (dead overflow branch)
     local junk_forms = {
@@ -448,7 +448,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
                 "%sdo local %s=%q;local %s=string.upper(%s);if #%s<0 then %s=%s end end\n",
                 indent, v1, w, v2, v1, v2, v1, v2)
         end,
-        -- form 11: byte-pack roundtrip identity
+        -- form 11: byte-pack round-trip identity
         function(indent)
             local v1, v2 = jpick2()
             local c = string.char(math.random(97, 122))
