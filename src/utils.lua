@@ -9,28 +9,57 @@ local Utils = {}
 
 local ALPHA = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 local ALPHA_LO = "abcdefghijklmnopqrstuvwxyz"
-local IDENTIFIER_CHARS_REST = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
-local UNDERSCORE_PREFIX_CHANCE = 3 -- 1 in 3 identifiers start with "_"
 
---- Generate a random valid Lua identifier with opaque/non-semantic appearance.
----@param min_len integer|nil Minimum length (default: 8)
----@param max_len integer|nil Maximum length (default: 16)
+-- Word parts used for human-style camelCase / compound names.
+-- Enough variety to produce >5000 unique combinations without collision.
+local _NAME_A = {
+    "get","set","has","run","load","save","make","check","read","find",
+    "calc","init","push","pull","put","add","try","use","raw","cur",
+    "next","last","base","open","send","recv","emit","bind","wrap","cast",
+}
+local _NAME_B = {
+    "Val","Buf","Len","Idx","Ref","Data","State","Count","Flag","Key",
+    "Hash","Map","List","Node","Item","Base","Type","Mode","Step","Size",
+    "Cap","Pos","Off","Src","Dst","Out","Ret","Tag","Ptr","Slot",
+}
+
+--- Generate a single random valid Lua identifier with human-like appearance.
+--- Three styles are chosen randomly each call:
+---   1) camelCase  – e.g. "getState", "loadKey3"
+---   2) compound   – e.g. "bufLen", "srcPos7"
+---   3) alpha-only – e.g. "mxrptv" (fallback, guarantees uniqueness)
+---@param min_len integer  ignored for styles 1-2, used for style 3
+---@param max_len integer  ignored for styles 1-2, used for style 3
 function Utils.rand_name(min_len, max_len)
-    min_len = min_len or 8
-    max_len = max_len or 16
-    local len = math.random(min_len, max_len)
-    local buf = {}
-    if math.random(1, UNDERSCORE_PREFIX_CHANCE) == 1 then
-        buf[1] = "_"
+    local style = math.random(1, 3)
+    if style == 1 then
+        -- camelCase: verb + Noun, optional trailing digit
+        local s = _NAME_A[math.random(1, #_NAME_A)] .. _NAME_B[math.random(1, #_NAME_B)]
+        if math.random(1, 4) == 1 then s = s .. math.random(2, 9) end
+        return s
+    elseif style == 2 then
+        -- compound lower: two short words, second capitalised, optional digit
+        local a = _NAME_A[math.random(1, #_NAME_A)]
+        local b = _NAME_B[math.random(1, #_NAME_B)]:lower()
+        local s = a .. b:sub(1,1):upper() .. b:sub(2)
+        if math.random(1, 5) == 1 then s = s .. math.random(2, 9) end
+        return s
     else
-        local p = math.random(1, #ALPHA_LO)
-        buf[1] = ALPHA_LO:sub(p, p)
+        -- Pure alpha, no digits mid-name; letters only, occasional digit suffix.
+        min_len = min_len or 4
+        max_len = max_len or 9
+        local len = math.random(min_len, max_len)
+        local buf = {}
+        local p0 = math.random(1, #ALPHA_LO)
+        buf[1] = ALPHA_LO:sub(p0, p0)
+        for i = 2, len do
+            local p = math.random(1, #ALPHA)
+            buf[i] = ALPHA:sub(p, p)
+        end
+        -- Rare trailing digit (not mid-name)
+        if math.random(1, 6) == 1 then buf[len + 1] = tostring(math.random(2, 9)) end
+        return table.concat(buf)
     end
-    for i = 2, len do
-        local p = math.random(1, #IDENTIFIER_CHARS_REST)
-        buf[i] = IDENTIFIER_CHARS_REST:sub(p, p)
-    end
-    return table.concat(buf)
 end
 
 --- Generate `count` unique random identifiers (no collisions)
@@ -135,15 +164,13 @@ end
 
 -- ─── Byte-string serialization helpers ───────────────────────────────────────
 
---- Encode a byte string as a Lua \NNN escape string (no quotes).
---- Uses fixed-width 3-digit decimal escapes to avoid parser ambiguity when
---- adjacent escapes start with digits.
+--- Encode a byte string as a Lua \NNN escape string (no quotes)
 ---@param data string
 ---@return string
 function Utils.to_escape(data)
     local out = {}
     for i = 1, #data do
-        out[i] = string.format("\\%03d", data:byte(i))
+        out[i] = string.format("\\%d", data:byte(i))
     end
     return table.concat(out)
 end

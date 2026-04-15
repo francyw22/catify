@@ -9,17 +9,16 @@ heavily protected VM bytecode — matching the `superflow_bytecode` format used 
 
 | Protection layer | Details |
 |---|---|
-| **Custom VM** | Full Lua 5.3 VM in generated source; all 47 opcodes + virtual decoy opcodes |
+| **Custom VM** | Full Lua 5.3 VM in generated source; all 47 opcodes implemented |
 | **Opcode shuffle** | Real opcode numbers replaced by random shuffled IDs per output |
 | **AES-256-CTR encryption** | Bytecode payload encrypted with a fresh 32-byte key + 8-byte nonce per run |
-| **Base91 payload encoding** | Encrypted blob emitted as Base91 string (`superflow_bytecode`) |
+| **Base91 payload** | Encrypted blob encoded as a single compact Base91 string (`superflow_bytecode`) |
 | **SHA-256 integrity** | Runtime SHA-256 check on the encrypted blob (8 obfuscated word comparisons) |
-| **Anti-keylogger checks** | Runtime checks for debug hook, io library, string metatable, pcall integrity |
+| **Anti-keylogger checks** | 4 runtime checks: debug hook, io library, string metatable, pcall integrity |
 | **Debug-hook detection** | Detects `debug.sethook` / `debug.getinfo` usage at runtime |
-| **Environment check** | Verifies critical globals and detects common env/logger hook patterns |
+| **Environment check** | Verifies critical globals (`tostring`, `type`, `string`, …) are intact |
 | **Junk injection** | Dead-code statements sprinkled throughout the VM dispatch loop |
 | **ASCII cat watermark** | Obfuscated watermark string embedded in generated output |
-| **Roblox tiny loader** | `--roblox` now emits one compact line and stores payload + `key`/`nonce` in Base91 (decoded at runtime) |
 
 ---
 
@@ -31,9 +30,6 @@ lua catify.lua myscript.lua output.lua
 
 # Two-pass (VM wrapped inside another VM — much harder to reverse)
 lua catify.lua --passes 2 myscript.lua output.lua
-
-# Tiny Roblox output (runtime loaded remotely via HttpGet)
-lua catify.lua myscript.lua output.lua --roblox
 
 # Run the obfuscated script
 lua output.lua
@@ -85,8 +81,6 @@ chat command.
 | `CATIFY_TOKEN` | — | Discord bot token (required) |
 | `CATIFY_PREFIX` | `!` | Command prefix |
 | `CATIFY_PASSES` | `1` | Obfuscation passes (1 or 2) |
-| `CATIFY_ROBLOX` | `false` | Enable tiny Roblox HTTP-runtime output mode |
-| `CATIFY_ROBLOX_RUNTIME_URL` | `""` | Optional custom runtime URL for Roblox mode (enables Roblox mode when set) |
 | `CATIFY_MAX_INLINE` | `32768` | Max inline code size in bytes |
 | `CATIFY_MAX_FILE` | `524288` | Max attachment size in bytes |
 
@@ -97,8 +91,10 @@ chat command.
 The generated file looks like:
 
 ```lua
-superflow_bytecode="Aq$...~" -- Base91-encoded encrypted payload
+superflow_bytecode="ABCDEFGHIJKLMNOPQRSTUVWXYZab..." -- Base91-encoded encrypted payload
 do
+local <b91_alpha>="ABCDEFGHIJKLMNOPQRSTUVWXYZabc..."
+local function <b91_dec>(...) ... end   -- Base91 decoder
 local <aes_sbox>={[0]=99,124,...}       -- AES S-box
 local function <aes_xtime>(...) ... end
 local function <aes_key_expand>(...) ... end
@@ -119,7 +115,7 @@ src/
   parser.lua        – Lua 5.3 bytecode parser
   passes.lua        – Obfuscation passes (opcode shuffle, junk injection…)
   vm_gen.lua        – VM source code generator
-  utils.lua         – AES-256-CTR, SHA-256, byte escaping, CRC-32, random name generator
+  utils.lua         – AES-256-CTR, SHA-256, Base91, CRC-32, random name generator
 bot/
   discord_bot.js    – discord.js (Node.js) Discord bot
   package.json      – Node.js dependencies
