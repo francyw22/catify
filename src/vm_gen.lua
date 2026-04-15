@@ -740,14 +740,14 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- [5] GETUPVAL (defensive: nil upval box → nil)
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) local _u=%s[%s];%s[%s].v=_u and _u.v or nil end",
        vDispatch, fwdmap[5], eA,eB,eC,eBx,eSBx, eUpvals,eB, eRegs,eA)
-    -- [6] GETTABUP
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s[%s].v[%s(%s)] end",
-       vDispatch, fwdmap[6], eA,eB,eC,eBx,eSBx, eRegs,eA, eUpvals,eB, eRk,eC)
+    -- [6] GETTABUP (defensive: missing upval box → nil; present box → normal indexing)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) local _u=%s[%s];%s[%s].v=_u and _u.v[%s(%s)] end",
+       vDispatch, fwdmap[6], eA,eB,eC,eBx,eSBx, eUpvals,eB, eRegs,eA, eRk,eC)
     -- [7] GETTABLE
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s[%s].v[%s(%s)] end",
        vDispatch, fwdmap[7], eA,eB,eC,eBx,eSBx, eRegs,eA, eRegs,eB, eRk,eC)
-    -- [8] SETTABUP
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v[%s(%s)]=%s(%s) end",
+    -- [8] SETTABUP (defensive: missing upval box → no-op; present box → normal indexing)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) local _u=%s[%s];if _u then _u.v[%s(%s)]=%s(%s) end end",
        vDispatch, fwdmap[8], eA,eB,eC,eBx,eSBx, eUpvals,eA, eRk,eB, eRk,eC)
     -- [9] SETUPVAL
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s[%s].v end",
@@ -936,7 +936,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("    local %s=%s(%s(%s,%s),%s)",   eC,  bAnd,bShr,eInst,eSh14,eMask511)
     LF("    local %s=%s(%s(%s,%s),%s)",   eBx, bAnd,bShr,eInst,eSh14,eMask18)
     LF("    local %s=%s-%s",         eSBx,eBx,eBias)
-    LF("    %s[%s](%s,%s,%s,%s,%s)", vDispatch,eOp,eA,eB,eC,eBx,eSBx)
+    LF("    local %s=%s[%s]", "_dh_", vDispatch,eOp)
+    LF("    if %s then %s(%s,%s,%s,%s,%s) else error('Catify: unknown opcode '..tostring(%s),0) end", "_dh_","_dh_",eA,eB,eC,eBx,eSBx,eOp)
     LF("  end")
     LF("  return %s(%s,1,%s)", vUnpack,eRetVals,eRetN)
     LF("end")  -- end execute function
@@ -1116,7 +1117,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         LF("%s(%s,%s)", vAtExec, table.concat(chunks, ".."), _obfInt(mask))
     end
 
-    local env_expr = "((function() local _e=((_ENV~=nil and _ENV) or (_G~=nil and _G) or (type(getfenv)=='function' and getfenv(0)) or {}); return (type(_e)=='table' and _e) or {} end)())"
+    local env_expr = "((function() local _e=((type(_ENV)=='table' and _ENV) or (type(getfenv)=='function' and getfenv(0)) or (type(_G)=='table' and _G) or {}); return (type(_e)=='table' and _e) or {} end)())"
 
     -- Anti-tamper 2: debug hook detection (self-contained, wrapped in pcall for Roblox)
     at_load(string.format("do local _d;pcall(function() local _ce=%s;if type(_ce)=='table' then _d=rawget(_ce,'debug') end end);if _d and type(_d)=='table' and type(_d.gethook)=='function' then local _ok,_v=pcall(_d.gethook,_d);if _ok and _v~=nil then error('Catify: debug hook detected',0) end end end", env_expr))
@@ -1124,11 +1125,11 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Anti-tamper 3: critical global integrity check
     at_load("do local _loader=(type(load)=='function' and load) or (type(loadstring)=='function' and loadstring);local _req={tostring=tostring,type=type,pcall=pcall,string=string,table=table};for _k,_v in pairs(_req) do if _v==nil then error('Catify: environment tampered ('.._k..')',0) end end;if type(_loader)~='function' then error('Catify: environment tampered (loader)',0) end end")
 
-    -- Anti-tamper 4: Lua version must be 5.3, 5.4, or Roblox Luau
-    at_load("do local _v=_VERSION;if not(_v and(_v:find('5%.3') or _v:find('5%.4') or _v:find('Luau')))then error('Catify: unsupported Lua version',0) end end")
+    -- Anti-tamper 4: Lua version must be 5.1, 5.2, 5.3, 5.4, or Roblox Luau
+    at_load("do local _v=_VERSION;if not(_v and(_v:find('5%.1') or _v:find('5%.2') or _v:find('5%.3') or _v:find('5%.4') or _v:find('Luau')))then error('Catify: unsupported Lua version',0) end end")
 
     -- Anti-tamper 5: core standard functions must be genuine callable values
-    at_load("do local _t={rawequal,rawget,rawset,rawlen,select,ipairs,pairs,next,table.unpack or unpack};for _,_f in ipairs(_t) do if type(_f)~='function' then error('Catify: environment tampered (core)',0) end end end")
+    at_load("do local _t={rawequal,rawget,rawset,select,ipairs,pairs,next,table.unpack or unpack};if rawlen~=nil then _t[#_t+1]=rawlen end;for _,_f in ipairs(_t) do if type(_f)~='function' then error('Catify: environment tampered (core)',0) end end end")
 
     -- Anti-tamper 6: type() sanity (standard type names must not be overridden)
     if math.random(1, 2) == 1 then
