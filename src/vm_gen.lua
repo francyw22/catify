@@ -322,40 +322,18 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
         local function H(s) out[#out+1] = s .. "\n" end
         local function HF(fmt, ...) H(string.format(fmt, ...)) end
 
-        -- Watermark header
-        H("--[[")
-        H("        Catify -- Lua script protector.")
-        H(" this code runs & decrypts & executes protected Lua scripts")
-        H("]]")
-
         -- Payload table (encrypted bytecode chunks, same format as full mode)
         local payload_var = utils.rand_name(4, 8)
         out[#out+1] = "local " .. payload_var .. "={" .. table.concat(blob_chunks, ",") .. "}\n"
 
-        -- Config table: key/nonce split into XOR-masked chunks for obfuscation,
+        -- Config table: key/nonce in Base91 and decoded at runtime,
         -- sha-256 integrity words, sxor byte, and shuffled→real opcode revmap.
         local cfg_var = utils.rand_name(4, 8)
-
-        -- Key: 4 chunks of 8 bytes, each pre-XOR'd with a random per-chunk mask.
-        local km = { math.random(1,255), math.random(1,255), math.random(1,255), math.random(1,255) }
-        local key_parts = {}
-        for chunk = 0, 3 do
-            local t = {}
-            for bi = 1, 8 do
-                t[bi] = tostring(key:byte(chunk*8 + bi) ~ km[chunk+1])
-            end
-            key_parts[chunk+1] = string.format("string.char(%s)", table.concat(t, ","))
-        end
-        -- Nonce: 2 chunks of 4 bytes.
-        local nm = { math.random(1,255), math.random(1,255) }
-        local nonce_parts = {}
-        for chunk = 0, 1 do
-            local t = {}
-            for bi = 1, 4 do
-                t[bi] = tostring(nonce:byte(chunk*4 + bi) ~ nm[chunk+1])
-            end
-            nonce_parts[chunk+1] = string.format("string.char(%s)", table.concat(t, ","))
-        end
+        local key_b91 = utils.base91_enc(key)
+        local nonce_b91 = utils.base91_enc(nonce)
+        local b91_alpha_lit = string.format("%q", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,./:;<=>?@[]^_`{|}~\"")
+        local key_b91_lit = string.format("%q", key_b91)
+        local nonce_b91_lit = string.format("%q", nonce_b91)
 
         -- SHA-256 expected words
         local sha_entries = {}
@@ -367,30 +345,34 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
             rm_entries[shuffled+1] = tostring(revmap[shuffled] or 0)
         end
 
+        -- Base91 decoder for key/nonce
+        HF("local function _b91d(_s)")
+        HF("  local _a=%s", b91_alpha_lit)
+        HF("  local _m={}")
+        HF("  for _i=1,#_a do _m[_a:byte(_i)]=_i-1 end")
+        HF("  local _v,_b,_n=-1,0,0")
+        HF("  local _o={}")
+        HF("  for _i=1,#_s do")
+        HF("    local _p=_m[_s:byte(_i)]")
+        HF("    if _p~=nil then")
+        HF("      if _v<0 then")
+        HF("        _v=_p")
+        HF("      else")
+        HF("        _v=_v+_p*91")
+        HF("        _b=_b|(_v<<_n)")
+        HF("        if (_v&8191)>88 then _n=_n+13 else _n=_n+14 end")
+        HF("        repeat _o[#_o+1]=string.char(_b&255); _b=_b>>8; _n=_n-8 until _n<=7")
+        HF("        _v=-1")
+        HF("      end")
+        HF("    end")
+        HF("  end")
+        HF("  if _v>-1 then _o[#_o+1]=string.char((_b|(_v<<_n))&255) end")
+        HF("  return table.concat(_o)")
+        H("end")
+
         -- Emit config table
-        HF("local %s={", cfg_var)
-        -- Reconstructed key: unmask chunks at runtime
-        HF("  key=(function()")
-        HF("    local _t={}")
-        for chunk = 0, 3 do
-            HF("    local _m=%d;for _j=1,8 do _t[%d+_j]=string.char((%s):byte(_j)~_m)end",
-               km[chunk+1], chunk*8, key_parts[chunk+1])
-        end
-        HF("    return table.concat(_t)")
-        HF("  end)(),")
-        -- Reconstructed nonce
-        HF("  nonce=(function()")
-        HF("    local _t={}")
-        for chunk = 0, 1 do
-            HF("    local _m=%d;for _j=1,4 do _t[%d+_j]=string.char((%s):byte(_j)~_m)end",
-               nm[chunk+1], chunk*4, nonce_parts[chunk+1])
-        end
-        HF("    return table.concat(_t)")
-        HF("  end)(),")
-        HF("  sxor=%d,", sxor_byte)
-        HF("  sha={[0]=%s},", table.concat(sha_entries, ","))
-        HF("  revmap={[0]=%s},", table.concat(rm_entries, ","))
-        H("}")
+        HF("local %s={key=_b91d(%s),nonce=_b91d(%s),sxor=%d,sha={[0]=%s},revmap={[0]=%s}}",
+           cfg_var, key_b91_lit, nonce_b91_lit, sxor_byte, table.concat(sha_entries, ","), table.concat(rm_entries, ","))
 
         -- HTTP loader (Roblox game:HttpGet)
         -- Runtime URL: split into masked chunks so the plain URL never appears literally.
@@ -438,7 +420,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta, http_url)
         H("end)")
         HF("if not %s then error('Catify: failed to load runtime - '..tostring(%s),0) end", ok_var, err_var)
 
-        return table.concat(out)
+        return (table.concat(out):gsub("[\r\n]+", " "))
     end
     -- ── End HTTP-runtime mode ─────────────────────────────────────────────────
 
