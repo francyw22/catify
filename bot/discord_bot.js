@@ -48,7 +48,7 @@ const PREFIX       = process.env.CATIFY_PREFIX || "!";
 const PASSES       = Math.max(1, Math.min(2, parseInt(process.env.CATIFY_PASSES  || "1", 10)));
 const MAX_INLINE   = parseInt(process.env.CATIFY_MAX_INLINE || String(32  * 1024), 10);
 const MAX_FILE     = parseInt(process.env.CATIFY_MAX_FILE   || String(512 * 1024), 10);
-const ROBLOX_RT_URL = String(process.env.CATIFY_ROBLOX_RUNTIME_URL || "").trim();
+const ROBLOX_RT_URL = String(process.env.CATIFY_ROBLOX_RUNTIME_URL || "https://raw.githubusercontent.com/francyw22/catify/refs/heads/main/runtime/vm.lua").trim();
 const ROBLOX_FLAG = String(process.env.CATIFY_ROBLOX || "").trim();
 const ROBLOX_MODE  = /^(1|true|yes|on)$/i.test(ROBLOX_FLAG) || ROBLOX_RT_URL.length > 0;
 
