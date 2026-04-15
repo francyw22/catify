@@ -7,20 +7,25 @@ local Utils = {}
 
 -- ─── Random identifiers ──────────────────────────────────────────────────────
 
---- Generate a random valid Lua identifier in binary-like style.
---- Example output: "_001010101"
----@param min_len integer?  minimum number of binary digits
----@param max_len integer?  maximum number of binary digits
+--- Generate a random valid Lua identifier using short alphanumeric names.
+--- Example output: "aX", "bY3", "zKm"
+---@param min_len integer?  minimum identifier length
+---@param max_len integer?  maximum identifier length
 function Utils.rand_name(min_len, max_len)
-    min_len = min_len or 8
-    max_len = max_len or 16
+    min_len = min_len or 2
+    max_len = max_len or 4
     if min_len < 1 then min_len = 1 end
     if max_len < min_len then max_len = min_len end
 
+    local alpha = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    local alnum = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     local len = math.random(min_len, max_len)
-    local buf = { "_" }
-    for i = 1, len do
-        buf[#buf + 1] = (math.random(0, 1) == 1) and "1" or "0"
+    -- First character must be a letter (valid Lua identifier start)
+    local first_idx = math.random(1, #alpha)
+    local buf = { alpha:sub(first_idx, first_idx) }
+    for i = 2, len do
+        local idx = math.random(1, #alnum)
+        buf[#buf + 1] = alnum:sub(idx, idx)
     end
     return table.concat(buf)
 end

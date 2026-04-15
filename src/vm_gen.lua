@@ -126,9 +126,8 @@ end
 -- to any third-party tool that processes or re-encodes the generated Lua file.
 local PAYLOAD_VAR_NAME = "superflow_bytecode"
 local function emit_payload_b91(b91str)
-    -- Assign the base91 string to a global variable (no `local` so it is
-    -- accessible both from outside and inside the do-block).
-    return PAYLOAD_VAR_NAME .. "=" .. string.format("%q", b91str) .. ";"
+    -- Declare as local inside the wrapper function so it doesn't pollute global scope.
+    return "local " .. PAYLOAD_VAR_NAME .. "=" .. string.format("%q", b91str) .. ";"
 end
 
 -- Emit an integer as a Lua numeric literal (optionally obfuscated).
@@ -481,11 +480,11 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- ── Header comment (minimal, for compact output) ─────────────────────────
     -- (intentionally omitted for compact output)
 
-    -- ── Base91-encoded payload at the top (emitted before do block) ──────────
+    -- ── Wrap all VM internals in a self-contained immediately-invoked function ──
+    -- This keeps all locals scoped and propagates return values like AstrarServices style.
+    L("return(function(...)")
+    -- ── Base91-encoded payload declared as local inside the wrapper function ──────────
     src[#src+1] = emit_payload_b91(b91_blob) .. "\n"
-
-    -- Wrap all VM internals in a do...end block so locals don't pollute global scope
-    L("do")
     LF("local %s=tostring;local %s=type;local %s=pcall", bsToStr, bsType, bsPcall)
     LF("local %s=(type(load)=='function' and load) or (type(loadstring)=='function' and loadstring) or nil", vLoadCompat)
     LF("local %s=(table and table.pack) or function(...) return {n=select('#', ...),...} end", vPack)
@@ -1229,30 +1228,26 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("%s=nil;%s=nil;%s=nil", vBlob, dData, vLoadProto)  -- wipe after load
     LF("local %s={v=%s}", vEnv, env_expr)
     -- Initial upvals table uses a metatable so any upval[N] always returns a box
-    LF("%s(%s,setmetatable({[0]=%s},{__index=function(t,k)local b={};t[k]=b;return b end}))",
+    LF("return %s(%s,setmetatable({[0]=%s},{__index=function(t,k)local b={};t[k]=b;return b end}))",
        vExec, vProto, vEnv)
-    L("end")
+    L("end)(...)")
 
     -- ── Compact post-processing: strip indentation and join lines ────────────
     local full = table.concat(src)
     local compact_lines = {}
     for line in full:gmatch("[^\n]+") do
         -- Strip leading whitespace, then strip trailing whitespace separately
-        local trimmed = line:match("^%s*(.+)$")        if trimmed then
+        local trimmed = line:match("^%s*(.+)$")
+        if trimmed then
             trimmed = trimmed:match("^(.-)%s*$")
         end
         if trimmed and trimmed ~= "" then
             compact_lines[#compact_lines + 1] = trimmed
         end
     end
-    -- Prepend ASCII watermark as a block comment at the top of the output file
-    local watermark = "--[[\n"
-        .. "   /\\_/\\  \n"
-        .. "  ( o.o ) \n"
-        .. "   > ^ <  \n"
-        .. "  Catify v2.0.0 -- Protected by Catify\n"
-        .. "]]\n"
-    return watermark .. table.concat(compact_lines, " ")
+    -- Single-line header comment (matches the compact AstrarServices output style)
+    local header = "-- This file was protected by Catify v2.0.0\n"
+    return header .. table.concat(compact_lines, " ")
 end
 
 return VmGen
