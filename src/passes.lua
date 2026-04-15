@@ -218,8 +218,9 @@ function Passes.inject_junk(proto, opmap, count)
         loadnil  = opmap and (opmap[4] or 4) or 4,   -- LOADNIL
     }
 
-    -- Real opcodes that conditionally skip the next instruction (always a JMP)
-    local COND_SKIP = { [31]=true, [32]=true, [33]=true, [34]=true, [35]=true }
+    -- Real opcodes that conditionally skip the next instruction.
+    -- EQ/LT/LE/TEST/TESTSET skip over a JMP; LOADBOOL (C!=0) skips the next op.
+    local COND_SKIP = { [3]=true, [31]=true, [32]=true, [33]=true, [34]=true, [35]=true }
     -- Real opcodes that carry a relative sBx jump offset
     local JUMP_OPS  = { [30]=true, [39]=true, [40]=true, [42]=true }
 
@@ -231,8 +232,19 @@ function Passes.inject_junk(proto, opmap, count)
         --    (the instruction immediately after a COND_SKIP must not be displaced)
         local protected = {}
         for i = 0, n - 1 do
-            local rop = revmap[p.code[i] & 0x3F] or (p.code[i] & 0x3F)
-            if COND_SKIP[rop] then protected[i + 1] = true end
+            local inst = p.code[i]
+            local rop = revmap[inst & 0x3F] or (inst & 0x3F)
+            local c = (inst >> 14) & 0x1FF
+            if COND_SKIP[rop] then
+                -- LOADBOOL only skips when C!=0.
+                if rop ~= 3 or c ~= 0 then
+                    protected[i + 1] = true
+                end
+            end
+            -- LOADKX and SETLIST(C==0) consume the next EXTRAARG instruction.
+            if rop == 2 or (rop == 43 and c == 0) then
+                protected[i + 1] = true
+            end
         end
 
         -- 2. Collect candidate positions and pick up to `count` unique safe ones
