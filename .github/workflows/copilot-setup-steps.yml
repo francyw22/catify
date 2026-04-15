@@ -45,7 +45,7 @@ for p in patterns:
         if re.search(p, url, re.IGNORECASE):
             print(url)
             raise SystemExit(0)
-print("No matching Linux Luau release asset found", file=sys.stderr)
+print(f"No matching Linux Luau release asset found. Patterns tried: {patterns}", file=sys.stderr)
 raise SystemExit(1)
 ')"
 
@@ -62,7 +62,7 @@ raise SystemExit(1)
             tar -xzf "$archive" -C "$extract_dir"
           fi
 
-          luau_bin="$(find "$extract_dir" -type f -executable -name luau | head -n1)"
+          luau_bin="$(find "$extract_dir" -type f -name luau | head -n1)"
           if [ -z "$luau_bin" ]; then
             echo "Luau binary not found in release asset: $asset_url" >&2
             exit 1
