@@ -258,6 +258,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     local atEnv3    = vn()
     -- Anti-tamper block executor (XOR decoder + load())
     local vAtExec   = vn()
+    local vAtFail   = vn()   -- unified anti-tamper failure path
+    local vAtTrip   = vn()   -- one-shot anti-tamper latch
     -- SHA-256 integrity check variable names
     local atSha     = vn()
     -- Watermark variable name
@@ -1186,6 +1188,10 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     -- Decode Base91 payload into vBlob (binary AES-encrypted blob)
     LF("local %s=%s(%s)", vBlob, b91Dec, PAYLOAD_VAR_NAME)
     LF("%s=nil", PAYLOAD_VAR_NAME)   -- wipe payload after decoding
+    -- Unified anti-tamper failure: emit exactly one console line and abort once.
+    LF("local %s=false", vAtTrip)
+    LF("local function %s() if %s then return end %s=true pcall(function() print('we love cats you dont?') end) error('we love cats you dont?',0) end", vAtFail, vAtTrip, vAtTrip)
+
     -- SHA-256 integrity check: compute hash and compare 8 words
     LF("local %s=%s(%s)", atSha, shaFn, vBlob)
     local sha_checks = {}
@@ -1196,31 +1202,13 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
         sha_checks[i+1] = string.format("(%s:byte(%d)*16777216+%s:byte(%d)*65536+%s:byte(%d)*256+%s:byte(%d)~=%s)",
             atSha, off, atSha, off+1, atSha, off+2, atSha, off+3, word_exp)
     end
-    -- Obfuscate the integrity-check error message so it doesn't appear as plaintext.
-    do
-        local emsg = "Catify: integrity check failed"
-        local emask = math.random(1, 255)
-        local eparts = {}
-        for i = 1, #emsg do eparts[i] = _obfInt(emsg:byte(i) ~ emask) end
-        -- Split into chunks of 60 to stay within Lua's register limit.
-        local echunks = {}
-        for i = 1, #eparts, 60 do
-            local ch = {}
-            for j = i, math.min(i + 59, #eparts) do ch[#ch+1] = eparts[j] end
-            echunks[#echunks+1] = string.format("string.char(%s)", table.concat(ch, ","))
-        end
-        -- The XOR decode is inlined as a function expression; emask is obfuscated.
-        local emask_expr = _obfInt(emask)
-        local eraw = table.concat(echunks, "..")
-        LF("if %s then local _em=%s local _ed={} for _i=1,#_em do _ed[_i]=string.char(%s(_em:byte(_i),%s)) end error(table.concat(_ed),0) end",
-           table.concat(sha_checks, " or "), eraw, bXor, emask_expr)
-    end
+    LF("if %s then %s() end", table.concat(sha_checks, " or "), vAtFail)
 
     -- ── Anti-tamper block executor: XOR-decode + load() ─────────────────────
     -- Each anti-tamper check is stored as XOR-encoded bytes; this helper
     -- decodes them at runtime and executes them via load() so that none of
     -- the check logic (error strings, API names) appears as readable text.
-    LF("local function %s(_e,_m) if type(%s)~='function' then error('Catify: environment tampered (loader)',0) end local _t={} for _i=1,#_e do _t[_i]=string.char(%s(_e:byte(_i),_m)) end local _f,_er=%s(table.concat(_t));if type(_f)~='function' then error('Catify: anti-tamper check failed',0) end _f() end", vAtExec, vLoadCompat, bXor, vLoadCompat)
+    LF("local function %s(_e,_m) if type(%s)~='function' then %s() end local _t={} for _i=1,#_e do _t[_i]=string.char(%s(_e:byte(_i),_m)) end local _f,_er=%s(table.concat(_t));if type(_f)~='function' then %s() end local _ok,_er2=pcall(_f);if not _ok then %s() end end", vAtExec, vLoadCompat, vAtFail, bXor, vLoadCompat, vAtFail, vAtFail)
 
     -- Lua-level helper: XOR-encode `code_str` with a random byte mask and
     -- emit a call to vAtExec(encoded_string, mask) into the generated source.
