@@ -124,13 +124,12 @@ end
 
 -- ─── Lua source code builder ───────────────────────────────────────────────────
 
--- The payload is emitted as a single quoted Lua \NNN-escaped string literal.
+-- The payload is emitted as a Lua table of \N-escaped string chunks.
+-- Each entry in the table is a quoted binary string of CHUNK_BYTES bytes.
+-- At runtime the VM concatenates them: table.concat(superflow_bytecode).
 local PAYLOAD_VAR_NAME = "superflow_bytecode"
-local function emit_payload_esc(escaped)
-    -- Assign the escaped blob to a global variable (no `local` so it is
-    -- accessible both from outside and inside the do-block).
-    return PAYLOAD_VAR_NAME .. "=\"" .. escaped .. "\";"
-end
+local PAYLOAD_CHUNK_MIN = 200   -- bytes per chunk (lower bound)
+local PAYLOAD_CHUNK_MAX = 250   -- bytes per chunk (upper bound)
 
 -- Emit an integer as a Lua numeric literal (optionally obfuscated).
 local function int_lit(n)
@@ -152,7 +151,14 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     local sxor_byte = math.random(1, 255)     -- per-session string XOR key
     local raw  = serialize_proto(proto, sxor_byte)
     local blob = utils.aes256_ctr(raw, key, nonce)
-    local esc_blob = utils.to_escape(blob)    -- \NNN-escape for direct Lua string payload
+    -- Split the encrypted blob into random-sized chunks and escape each one
+    -- separately, producing a Lua table literal:  superflow_bytecode={"\1\2...", ...}
+    local chunk_size = math.random(PAYLOAD_CHUNK_MIN, PAYLOAD_CHUNK_MAX)
+    local blob_chunks = {}
+    for ci = 1, #blob, chunk_size do
+        local piece = blob:sub(ci, math.min(ci + chunk_size - 1, #blob))
+        blob_chunks[#blob_chunks + 1] = '"' .. utils.to_escape(piece) .. '"'
+    end
 
     -- ── 2. Generate random identifiers for all locals ───────────────────────
     -- We need ~80 unique names for VM internals
@@ -568,8 +574,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     -- ── Header comment (minimal, for compact output) ─────────────────────────
     -- (intentionally omitted for compact output)
 
-    -- ── \NNN-escaped payload at the top (emitted before do block) ────────────
-    src[#src+1] = emit_payload_esc(esc_blob) .. "\n"
+    -- ── \N-escaped payload table at the top (emitted before do block) ─────────
+    src[#src+1] = PAYLOAD_VAR_NAME .. "={" .. table.concat(blob_chunks, ",") .. "};\n"
 
     -- Wrap all VM internals in a do...end block so locals don't pollute global scope
     L("do")
@@ -1160,8 +1166,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
     LF("  end")
     LF("  local _out={};for _i=1,8 do local _w=%s[_i];_out[_i]=string.char(_w//16777216,(_w//65536)%%256,(_w//256)%%256,_w%%256) end;return table.concat(_out)", shaH)
     LF("end")
-    -- Read escaped payload directly into vBlob (binary AES-encrypted blob)
-    LF("local %s=%s", vBlob, PAYLOAD_VAR_NAME)
+    -- Concatenate payload chunks and read into vBlob (binary AES-encrypted blob)
+    LF("local %s=table.concat(%s)", vBlob, PAYLOAD_VAR_NAME)
     LF("%s=nil", PAYLOAD_VAR_NAME)   -- wipe payload after decoding
     -- SHA-256 integrity check: compute hash and compare 8 words
     LF("local %s=%s(%s)", atSha, shaFn, vBlob)
@@ -1409,12 +1415,12 @@ function VmGen.generate(proto, revmap, key, nonce, utils, vm_meta)
             compact_lines[#compact_lines + 1] = trimmed
         end
     end
-    -- Prepend ASCII watermark as a block comment at the top of the output file
+    -- Prepend header block comment (Luarmor-style)
     local watermark = "--[[\n"
-        .. "   /\\_/\\  \n"
-        .. "  ( o.o ) \n"
-        .. "   > ^ <  \n"
-        .. "  Catify v2.0.0 -- Protected by Catify\n"
+        .. "        Catify -- Lua script protector.\n"
+        .. " this code runs & decrypts & executes protected Lua scripts\n"
+        .. "        https://github.com/francyw22/catify\n"
+        .. "\n"
         .. "]]\n"
     return watermark .. table.concat(compact_lines, " ")
 end
