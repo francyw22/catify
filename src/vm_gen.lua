@@ -1111,10 +1111,10 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         LF("%s(%s,%s)", vAtExec, table.concat(chunks, ".."), _obfInt(mask))
     end
 
-    local env_expr = "((_ENV~=nil and _ENV) or (_G~=nil and _G) or (type(getfenv)=='function' and getfenv(0)) or {})"
+    local env_expr = "((function() local _e=((_ENV~=nil and _ENV) or (_G~=nil and _G) or (type(getfenv)=='function' and getfenv(0)) or {}); return (type(_e)=='table' and _e) or {} end)())"
 
     -- Anti-tamper 2: debug hook detection (self-contained, wrapped in pcall for Roblox)
-    at_load(string.format("do local _d;pcall(function() local _ce=%s;_d=rawget(_ce,'debug') end);if _d and type(_d)=='table' and type(_d.gethook)=='function' then local _ok,_v=pcall(_d.gethook,_d);if _ok and _v~=nil then error('Catify: debug hook detected',0) end end end", env_expr))
+    at_load(string.format("do local _d;pcall(function() local _ce=%s;if type(_ce)=='table' then _d=rawget(_ce,'debug') end end);if _d and type(_d)=='table' and type(_d.gethook)=='function' then local _ok,_v=pcall(_d.gethook,_d);if _ok and _v~=nil then error('Catify: debug hook detected',0) end end end", env_expr))
 
     -- Anti-tamper 3: critical global integrity check
     at_load("do local _loader=(type(load)=='function' and load) or (type(loadstring)=='function' and loadstring);local _req={tostring=tostring,type=type,pcall=pcall,string=string,table=table};for _k,_v in pairs(_req) do if _v==nil then error('Catify: environment tampered ('.._k..')',0) end end;if type(_loader)~='function' then error('Catify: environment tampered (loader)',0) end end")
@@ -1149,17 +1149,17 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     end
 
     -- Anti-keylogger 1: no active debug hook (self-contained, more thorough check)
-    at_load(string.format("do local _k;pcall(function() local _ce=%s;local _d=rawget(_ce,'debug');if _d and type(_d.gethook)=='function' then _k=_d.gethook() end end);if _k~=nil then error('Catify: keylogger detected',0) end end", env_expr))
+    at_load(string.format("do local _k;pcall(function() local _ce=%s;local _d=(type(_ce)=='table' and rawget(_ce,'debug')) or nil;if _d and type(_d.gethook)=='function' then _k=_d.gethook() end end);if _k~=nil then error('Catify: keylogger detected',0) end end", env_expr))
 
     -- Anti-keylogger 2: io library integrity (keyloggers may replace io.read/write)
     -- io is nil in Roblox, so the nil guard makes this a no-op there.
     if math.random(1, 2) == 1 then
-        at_load(string.format("do local _ce=%s;local _io=rawget(_ce,'io');if _io~=nil and(type(_io.read)~='function' or type(_io.write)~='function')then error('Catify: keylogger detected (io)',0)end end", env_expr))
+        at_load(string.format("do local _ce=%s;local _io=(type(_ce)=='table' and rawget(_ce,'io')) or nil;if _io~=nil and(type(_io.read)~='function' or type(_io.write)~='function')then error('Catify: keylogger detected (io)',0)end end", env_expr))
     end
 
     -- Anti-keylogger 3: string metatable not tampered
     if math.random(1, 2) == 1 then
-        at_load("do local _m=getmetatable('');if _m~=nil then local _idx=rawget(_m,'__index');if _idx~=nil and type(_idx)~='table' then error('Catify: keylogger detected (strmeta)',0)end end end")
+        at_load("do local _m=getmetatable('');if type(_m)=='table' then local _idx=rawget(_m,'__index');if _idx~=nil and type(_idx)~='table' then error('Catify: keylogger detected (strmeta)',0)end end end")
     end
 
     -- Anti-keylogger 4: pcall/error uncompromised
@@ -1167,14 +1167,14 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
 
     -- Anti-environmental logger 1: detect _G/_ENV monitoring via metamethod proxy
     if math.random(1, 2) == 1 then
-        at_load("do local _m=getmetatable(_G or _ENV);if _m~=nil then if rawget(_m,'__newindex')~=nil or rawget(_m,'__index')~=nil then error('Catify: env logger detected',0)end end end")
+        at_load("do local _m=getmetatable(_G or _ENV);if type(_m)=='table' then if rawget(_m,'__newindex')~=nil or rawget(_m,'__index')~=nil then error('Catify: env logger detected',0)end end end")
     end
 
     -- Anti-environmental logger 2: os library integrity check.
     -- Roblox has os.time and os.clock but NOT os.getenv, so we only check
     -- the two functions that are guaranteed to exist on all supported platforms.
     if math.random(1, 2) == 1 then
-        at_load(string.format("do local _ce=%s;local _os=rawget(_ce,'os');if _os~=nil then if type(_os.time)~='function' or type(_os.clock)~='function' then error('Catify: env tampered (os)',0)end end end", env_expr))
+        at_load(string.format("do local _ce=%s;local _os=(type(_ce)=='table' and rawget(_ce,'os')) or nil;if _os~=nil then if type(_os.time)~='function' or type(_os.clock)~='function' then error('Catify: env tampered (os)',0)end end end", env_expr))
     end
 
     -- Anti-environmental logger 3: numbers must not have a metatable (some loggers patch this)
