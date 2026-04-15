@@ -286,6 +286,9 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local bOr  = vn()   -- bitwise OR   (a | b)
     local bShl = vn()   -- left shift   (a << b)
     local bShr = vn()   -- right shift  (a >> b)
+    local vLoadCompat = vn() -- load/loadstring runtime loader
+    local vPack = vn()       -- table.pack compat
+    local vUnpack = vn()     -- table.unpack compat
     -- Binary codec helpers for runtimes without string.pack/unpack (e.g. Luau)
     local rdU4le = vn()
     local rdI4le = vn()
@@ -464,23 +467,27 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
 
     -- Wrap all VM internals in a do...end block so locals don't pollute global scope
     L("do")
-    L("local _=tostring;local __=type;local ___=pcall;local ____=load")
+    L("local _=tostring;local __=type;local ___=pcall")
+    LF("local %s=(type(load)=='function' and load) or (type(loadstring)=='function' and loadstring) or nil", vLoadCompat)
+    LF("local %s=(table and table.pack) or function(...) return {n=select('#', ...),...} end", vPack)
+    LF("local %s=((table and table.unpack) or unpack)", vUnpack)
     -- Bitwise compat: use bit32 library if available (Roblox Luau), otherwise
-    -- load native Lua 5.3 operators via load() so the Luau parser never sees ~, &, |, <<, >>
+    -- compile native Lua 5.3 operators via loader so the Luau parser never sees ~, &, |, <<, >>
     LF("local %s,%s,%s,%s,%s,%s", bXor,bNot,bAnd,bOr,bShl,bShr)
-    LF("if type(bit32)=='table' then")
+    LF("if type(bit32)=='table' and type(bit32.bxor)=='function' and type(bit32.bnot)=='function' and type(bit32.band)=='function' and type(bit32.bor)=='function' then")
     LF("  %s=bit32.bxor;%s=bit32.bnot;%s=bit32.band;%s=bit32.bor", bXor,bNot,bAnd,bOr)
     -- bit32.lshift and bit32.rshift may be absent in some Roblox Luau builds.
     -- Fall back to a math-based equivalent using bit32.band (always present).
     LF("  %s=bit32.lshift or function(a,b) if b>=32 then return 0 end;return bit32.band(a*(2^b),0xFFFFFFFF) end", bShl)
     LF("  %s=bit32.rshift or function(a,b) if b>=32 then return 0 end;return math.floor(bit32.band(a,0xFFFFFFFF)/(2^b)) end", bShr)
     LF("else")
-    LF("  %s=load'return function(a,b)return a~b end'()", bXor)
-    LF("  %s=load'return function(a)return ~a end'()", bNot)
-    LF("  %s=load'return function(a,b)return a&b end'()", bAnd)
-    LF("  %s=load'return function(a,b)return a|b end'()", bOr)
-    LF("  %s=load'return function(a,b)return a<<b end'()", bShl)
-    LF("  %s=load'return function(a,b)return a>>b end'()", bShr)
+    LF("  if type(%s)~='function' then error('Catify: missing bitwise support',0) end", vLoadCompat)
+    LF("  local _f=%s('return function(a,b)return a~b end');if type(_f)~='function' then error('Catify: missing bitwise support',0) end;%s=_f()", vLoadCompat, bXor)
+    LF("  _f=%s('return function(a)return ~a end');if type(_f)~='function' then error('Catify: missing bitwise support',0) end;%s=_f()", vLoadCompat, bNot)
+    LF("  _f=%s('return function(a,b)return a&b end');if type(_f)~='function' then error('Catify: missing bitwise support',0) end;%s=_f()", vLoadCompat, bAnd)
+    LF("  _f=%s('return function(a,b)return a|b end');if type(_f)~='function' then error('Catify: missing bitwise support',0) end;%s=_f()", vLoadCompat, bOr)
+    LF("  _f=%s('return function(a,b)return a<<b end');if type(_f)~='function' then error('Catify: missing bitwise support',0) end;%s=_f()", vLoadCompat, bShl)
+    LF("  _f=%s('return function(a,b)return a>>b end');if type(_f)~='function' then error('Catify: missing bitwise support',0) end;%s=_f()", vLoadCompat, bShr)
     LF("end")
     -- Binary helpers: avoid hard dependency on string.pack/unpack at runtime.
     LF("local function %s(_s,_p) local _b1,_b2,_b3,_b4=_s:byte(_p,_p+3);return _b1+_b2*256+_b3*65536+_b4*16777216,_p+4 end", rdU4le)
@@ -678,7 +685,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
 
     -- The execute function (dispatch-table based)
     LF("local function %s(%s,%s,...)", vExec, eProto, eUpvals)
-    LF("  local %s=table.pack(...)", eArgs)
+    LF("  local %s=%s(...)", eArgs, vPack)
     -- Junk at function entry
     src[#src+1] = junk_block("  ", math.random(1, 2))
     -- Allocate register boxes (auto-create missing boxes via metatable)
@@ -805,7 +812,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("    local %s={}", eCallArgs)
     LF("    local %s=%s==0 and %s-%s or %s-1", eNargs,eB,eTop,eA,eB)
     LF("    for _i=1,%s do %s[_i]=%s[%s+_i].v end", eNargs,eCallArgs,eRegs,eA)
-    LF("    local %s=table.pack(%s(table.unpack(%s,1,%s)))", eResults,eFn,eCallArgs,eNargs)
+    LF("    local %s=%s(%s(%s(%s,1,%s)))", eResults,vPack,eFn,vUnpack,eCallArgs,eNargs)
     LF("    if %s==0 then", eC)
     LF("      for _i=0,%s.n-1 do if not %s[%s+_i] then %s[%s+_i]={} end;%s[%s+_i].v=%s[_i+1] end",
        eResults,eRegs,eA,eRegs,eA,eRegs,eA,eResults)
@@ -821,7 +828,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("    local %s={}", eCallArgs)
     LF("    local %s=%s==0 and %s-%s or %s-1", eNargs,eB,eTop,eA,eB)
     LF("    for _i=1,%s do %s[_i]=%s[%s+_i].v end", eNargs,eCallArgs,eRegs,eA)
-    LF("    local %s=table.pack(%s(table.unpack(%s,1,%s)))", eResults,eFn,eCallArgs,eNargs)
+    LF("    local %s=%s(%s(%s(%s,1,%s)))", eResults,vPack,eFn,vUnpack,eCallArgs,eNargs)
     LF("    %s=true;%s=%s.n", eDone,eRetN,eResults)
     LF("    for _i=1,%s do %s[_i]=%s[_i] end", eRetN,eRetVals,eResults)
     LF("  end")
@@ -847,8 +854,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
        vDispatch, fwdmap[40], eA,eB,eC,eBx,eSBx, eRegs,eA,eRegs,eA,eRegs,eA, ePc,ePc,eSBx)
     -- [41] TFORCALL
     LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, fwdmap[41], eA,eB,eC,eBx,eSBx)
-    LF("    local %s=table.pack(%s[%s].v(%s[%s+1].v,%s[%s+2].v))",
-       eResults,eRegs,eA,eRegs,eA,eRegs,eA)
+    LF("    local %s=%s(%s[%s].v(%s[%s+1].v,%s[%s+2].v))",
+       eResults,vPack,eRegs,eA,eRegs,eA,eRegs,eA)
     LF("    for _i=1,%s do if not %s[%s+2+_i] then %s[%s+2+_i]={} end;%s[%s+2+_i].v=%s[_i] end",
        eC,eRegs,eA,eRegs,eA,eRegs,eA,eResults)
     LF("  end")
@@ -924,7 +931,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("    local %s=%s-%s",         eSBx,eBx,eBias)
     LF("    %s[%s](%s,%s,%s,%s,%s)", vDispatch,eOp,eA,eB,eC,eBx,eSBx)
     LF("  end")
-    LF("  return table.unpack(%s,1,%s)", eRetVals,eRetN)
+    LF("  return %s(%s,1,%s)", vUnpack,eRetVals,eRetN)
     LF("end")  -- end execute function
     -- Junk block after execute function definition
     src[#src+1] = junk_block("", math.random(2, 4))
@@ -1079,7 +1086,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Each anti-tamper check is stored as XOR-encoded bytes; this helper
     -- decodes them at runtime and executes them via load() so that none of
     -- the check logic (error strings, API names) appears as readable text.
-    LF("local function %s(_e,_m) if type(load)~='function' then return end local _t={} for _i=1,#_e do _t[_i]=string.char(%s(_e:byte(_i),_m)) end local _f=load(table.concat(_t));if _f then _f() end end", vAtExec, bXor)
+    LF("local function %s(_e,_m) if type(%s)~='function' then return end local _t={} for _i=1,#_e do _t[_i]=string.char(%s(_e:byte(_i),_m)) end local _f=%s(table.concat(_t));if type(_f)=='function' then _f() end end", vAtExec, vLoadCompat, bXor, vLoadCompat)
 
     -- Lua-level helper: XOR-encode `code_str` with a random byte mask and
     -- emit a call to vAtExec(encoded_string, mask) into the generated source.
@@ -1108,7 +1115,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     at_load(string.format("do local _d;pcall(function() local _ce=%s;_d=rawget(_ce,'debug') end);if _d and type(_d)=='table' and type(_d.gethook)=='function' then local _ok,_v=pcall(_d.gethook,_d);if _ok and _v~=nil then error('Catify: debug hook detected',0) end end end", env_expr))
 
     -- Anti-tamper 3: critical global integrity check
-    at_load("do local _req={tostring=tostring,type=type,pcall=pcall,load=load,string=string,table=table};for _k,_v in pairs(_req) do if _v==nil then error('Catify: environment tampered ('.._k..')',0) end end end")
+    at_load("do local _loader=(type(load)=='function' and load) or (type(loadstring)=='function' and loadstring);local _req={tostring=tostring,type=type,pcall=pcall,string=string,table=table};for _k,_v in pairs(_req) do if _v==nil then error('Catify: environment tampered ('.._k..')',0) end end;if type(_loader)~='function' then error('Catify: environment tampered (loader)',0) end end")
 
     -- Anti-tamper 4: Lua version must be 5.3, 5.4, or Roblox Luau
     at_load("do local _v=_VERSION;if not(_v and(_v:find('5%.3') or _v:find('5%.4') or _v:find('Luau')))then error('Catify: unsupported Lua version',0) end end")
