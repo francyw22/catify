@@ -303,7 +303,9 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- so no ~ operator appears in the generated output (Luau/Lua 5.1 compatible).
     local function _obfInt(n)
         local mode = math.random(0, 5)
-        if mode == 1 then
+        if mode == 0 then
+            return utils.obfuscate_int_deep(n, bXor)
+        elseif mode == 1 then
             return utils.obfuscate_int_deep(n, bXor)
         elseif mode == 2 then
             return utils.obfuscate_int_triple(n, bXor)
