@@ -152,11 +152,32 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local b91_blob = utils.base91_enc(blob)   -- Base91-encode for safe single-string payload
 
     -- ── 2. Generate random identifiers for all locals ───────────────────────
-    -- We need ~80 unique names for VM internals
-    local N  = utils.rand_names(200)
+    -- We need ~80 unique names for VM internals.
+    -- Pre-allocate with buffer for per-check anti-tamper locals; vn() can still extend.
+    -- 220 ~= 80 core VM locals + per-check anti-tamper locals + safety margin.
+    local INITIAL_NAME_POOL_SIZE = 220
+    -- Allow enough retries to ride out random collisions before hard-failing.
+    local EXTRA_NAME_MAX_ATTEMPTS = INITIAL_NAME_POOL_SIZE * 5
+    local N  = utils.rand_names(INITIAL_NAME_POOL_SIZE)
+    local used_names = {}
+    for i = 1, #N do used_names[N[i]] = true end
     local ni = 0
     local function vn()   -- "variable name"
         ni = ni + 1
+        if ni > #N then
+            local extra
+            local attempts = 0
+            repeat
+                attempts = attempts + 1
+                extra = utils.rand_name()
+            until (not used_names[extra]) or attempts >= EXTRA_NAME_MAX_ATTEMPTS
+            if used_names[extra] then
+                error("VmGen: failed to allocate a unique identifier after "
+                    .. attempts .. " attempts (pool size: " .. #N .. ")")
+            end
+            used_names[extra] = true
+            N[#N + 1] = extra
+        end
         return N[ni]
     end
 
@@ -1346,7 +1367,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
        vExec, vProto, vEnv)
     L("end)(...)")
 
-    -- ── Compact post-processing: strip indentation and join lines ────────────
+    -- ── Compact post-processing: strip indentation and keep line boundaries ───
     local full = table.concat(src)
     local compact_lines = {}
     for line in full:gmatch("[^\n]+") do
@@ -1361,7 +1382,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     end
     -- Single-line header comment (matches the compact AstrarServices output style)
     local header = "-- This file was protected by Catify v2.0.0\n"
-    return header .. table.concat(compact_lines, " ")
+    return header .. table.concat(compact_lines, "\n")
 end
 
 return VmGen
