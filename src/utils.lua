@@ -7,6 +7,15 @@ local Utils = {}
 
 -- ─── Random identifiers ──────────────────────────────────────────────────────
 
+local LUA_KEYWORDS = {
+    ["and"] = true, ["break"] = true, ["do"] = true, ["else"] = true, ["elseif"] = true,
+    ["end"] = true, ["false"] = true, ["for"] = true, ["function"] = true, ["goto"] = true,
+    ["if"] = true, ["in"] = true, ["local"] = true, ["nil"] = true, ["not"] = true,
+    ["or"] = true, ["repeat"] = true, ["return"] = true, ["then"] = true, ["true"] = true,
+    ["until"] = true, ["while"] = true,
+}
+local MAX_IDENTIFIER_GENERATION_ATTEMPTS = 1000
+
 --- Generate a random valid Lua identifier using short alphanumeric names.
 --- Example output: "aX", "bY3", "zKm"
 ---@param min_len integer?  minimum identifier length
@@ -19,15 +28,21 @@ function Utils.rand_name(min_len, max_len)
 
     local alpha = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
     local alnum = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-    local len = math.random(min_len, max_len)
-    -- First character must be a letter (valid Lua identifier start)
-    local first_idx = math.random(1, #alpha)
-    local buf = { alpha:sub(first_idx, first_idx) }
-    for i = 2, len do
-        local idx = math.random(1, #alnum)
-        buf[#buf + 1] = alnum:sub(idx, idx)
+    for _ = 1, MAX_IDENTIFIER_GENERATION_ATTEMPTS do
+        local len = math.random(min_len, max_len)
+        -- First character must be a letter (valid Lua identifier start)
+        local first_idx = math.random(1, #alpha)
+        local buf = { alpha:sub(first_idx, first_idx) }
+        for i = 2, len do
+            local idx = math.random(1, #alnum)
+            buf[#buf + 1] = alnum:sub(idx, idx)
+        end
+        local name = table.concat(buf)
+        if not LUA_KEYWORDS[name] then
+            return name
+        end
     end
-    return table.concat(buf)
+    error("Failed to generate a non-keyword Lua identifier")
 end
 
 --- Generate `count` unique random identifiers (no collisions)
