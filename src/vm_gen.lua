@@ -153,7 +153,10 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
 
     -- ── 2. Generate random identifiers for all locals ───────────────────────
     -- We need ~80 unique names for VM internals
-    local N  = utils.rand_names(220)
+    -- Initial pre-allocation for the common path; vn() extends this pool as needed.
+    local INITIAL_NAME_POOL_SIZE = 220
+    local EXTRA_NAME_MAX_ATTEMPTS = 1000
+    local N  = utils.rand_names(INITIAL_NAME_POOL_SIZE)
     local used_names = {}
     for i = 1, #N do used_names[N[i]] = true end
     local ni = 0
@@ -161,7 +164,14 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         ni = ni + 1
         if ni > #N then
             local extra
-            repeat extra = utils.rand_name() until not used_names[extra]
+            local attempts = 0
+            repeat
+                attempts = attempts + 1
+                extra = utils.rand_name()
+            until (not used_names[extra]) or attempts >= EXTRA_NAME_MAX_ATTEMPTS
+            if used_names[extra] then
+                error("VmGen: failed to allocate a unique identifier")
+            end
             used_names[extra] = true
             N[#N + 1] = extra
         end
