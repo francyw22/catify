@@ -154,7 +154,9 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- ── 2. Generate random identifiers for all locals ───────────────────────
     -- We need ~80 unique names for VM internals.
     -- Pre-allocate with buffer for per-check anti-tamper locals; vn() can still extend.
+    -- 220 ~= 80 core VM locals + per-check anti-tamper locals + safety margin.
     local INITIAL_NAME_POOL_SIZE = 220
+    -- Allow enough retries to ride out random collisions before hard-failing.
     local EXTRA_NAME_MAX_ATTEMPTS = INITIAL_NAME_POOL_SIZE * 5
     local N  = utils.rand_names(INITIAL_NAME_POOL_SIZE)
     local used_names = {}
