@@ -296,10 +296,12 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local vNp2 = vn()   -- nonce bytes 5-8, pre-XOR'd with nonce mask 2
     local vDk1 = vn()   -- decoy key fragment 1 (never used for real decryption)
     local vDk2 = vn()   -- decoy key fragment 2 (never used for real decryption)
-    -- Bitwise compat helpers: use bit32 (Roblox Luau) or native ops loaded via load()
-    -- (native ops in load() strings bypass Luau's parser so older Luau versions work too)
+    -- Bitwise compat helpers: use randomized helper identifiers so fixed
+    -- helper signatures don't appear in output.
+    -- Native ops in load() strings bypass Luau's parser so older Luau versions work too.
     local bXor, bNot, bAnd, bOr, bShl, bShr =
-        "__bxor_catify", "__bnot_catify", "__band_catify", "__bor_catify", "__bshl_catify", "__bshr_catify"
+        "__" .. vn() .. "_catify", "__" .. vn() .. "_catify", "__" .. vn() .. "_catify",
+        "__" .. vn() .. "_catify", "__" .. vn() .. "_catify", "__" .. vn() .. "_catify"
     local vLoadCompat = vn() -- load/loadstring runtime loader
     local vPack = vn()       -- table.pack compat
     local vUnpack = vn()     -- table.unpack compat
@@ -443,6 +445,11 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     --  form 8: string.rep + #  identity
     --  form 9: fake config table with dead branch (looks like real init code)
     --  form 10: fake string sanitize (dead upper/lower branch)
+    -- Shared pool for forms 15-18: all printable ASCII valid in Luau long strings,
+    -- excluding ']' (would close [=[...]=]) and '%' (would corrupt string.format calls
+    -- in the generator). Only Luau/Roblox-safe ASCII characters are included.
+    local _JUNK_POOL = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" ..
+                       "!\"#$&'()*+,-./:;<=>?@[\\^_`{|}~"
     local junk_forms = {
         -- form 1: x XOR x == 0
         function(indent)
@@ -574,23 +581,70 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
                 indent, v1, n, v2, v1, v2, slen, v1, v1)
         end,
         -- form 15: random garbage-string dead-code assignment (looks like obfuscated data/token)
-        -- Generates a fresh random string of 80-200 printable chars (style: mix of
-        -- alphanumeric and symbols) each time; dead branch guarantees it never executes.
-        -- ']' is excluded from the pool so the value is always safe inside [=[...]=].
+        -- Generates a fresh random string of 300-1500 printable ASCII chars (mix of alphanumeric
+        -- and Luau-valid symbols) each time; dead branch guarantees it never executes.
+        -- Uses _JUNK_POOL (no ']' or '%'); string concatenation avoids format-string injection.
         function(indent)
-            local _pool = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" ..
-                          "!+#;)/_%<>=^~&.${@|,?*(:}`\""
-            local len = math.random(80, 200)
+            local len = math.random(300, 1500)
             local chars = {}
             for i = 1, len do
-                local pos = math.random(1, #_pool)
-                chars[i] = _pool:sub(pos, pos)
+                local pos = math.random(1, #_JUNK_POOL)
+                chars[i] = _JUNK_POOL:sub(pos, pos)
             end
             local garbage = table.concat(chars)
             local v1 = jpick()
-            return string.format(
-                "%sdo local %s=[=[%s]=];if #%s<0 then %s=nil end end\n",
-                indent, v1, garbage, v1, v1)
+            return indent.."do local "..v1.."=[=["..garbage.."]=];if #"..v1.."<0 then "..v1.."=nil end end\n"
+        end,
+        -- form 16: very large symbol-heavy garbage string (8000-20000 chars).
+        -- Uses _JUNK_POOL (Luau-valid ASCII only); concatenation return avoids format-string injection.
+        function(indent)
+            local len = math.random(8000, 20000)
+            local chars = {}
+            for i = 1, len do
+                local pos = math.random(1, #_JUNK_POOL)
+                chars[i] = _JUNK_POOL:sub(pos, pos)
+            end
+            local garbage = table.concat(chars)
+            local v1 = jpick()
+            return indent.."do local "..v1.."=[=["..garbage.."]=];if #"..v1.."<0 then "..v1.."=nil end end\n"
+        end,
+        -- form 17: dead multi-string array — builds 50-150 symbol-heavy strings into a
+        -- table array and concatenates them; dead branch discards the result.
+        -- Each entry is 30-150 Luau-valid ASCII chars; total output 1500-22500 chars.
+        function(indent)
+            local count = math.random(50, 150)
+            local entries = {}
+            for i = 1, count do
+                local slen = math.random(30, 150)
+                local chars = {}
+                for j = 1, slen do
+                    local pos = math.random(1, #_JUNK_POOL)
+                    chars[j] = _JUNK_POOL:sub(pos, pos)
+                end
+                entries[i] = "[=["..table.concat(chars).."]=]"
+            end
+            local v1, v2 = jpick2()
+            local tbl = table.concat(entries, ",")
+            return indent.."do local "..v1.."={"..tbl.."};local "..v2.."=table.concat("..v1..");if #"..v2.."<0 then "..v2.."=nil end end\n"
+        end,
+        -- form 18: dead symbol-string array — 20-60 Luau-valid ASCII symbol strings stored
+        -- in a table, length-checked, then discarded via always-false branch. Each string
+        -- 20-80 chars. Concatenation-built return; no string.format injection risk.
+        function(indent)
+            local count = math.random(20, 60)
+            local entries = {}
+            for i = 1, count do
+                local vlen = math.random(20, 80)
+                local vchars = {}
+                for j = 1, vlen do
+                    local pos = math.random(1, #_JUNK_POOL)
+                    vchars[j] = _JUNK_POOL:sub(pos, pos)
+                end
+                entries[i] = "[=["..table.concat(vchars).."]=]"
+            end
+            local v1, v2 = jpick2()
+            local tbl = table.concat(entries, ",")
+            return indent.."do local "..v1.."={"..tbl.."};local "..v2.."=#"..v1..";if "..v2.."<0 then "..v1.."=nil end end\n"
         end,
     }
     local function junk_stmt(indent)
@@ -660,7 +714,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("end")
     LF("local function %s(_v) return string.char(%s(%s(_v,24),255),%s(%s(_v,16),255),%s(%s(_v,8),255),%s(_v,255)) end", wrU4be, bAnd, bShr, bAnd, bShr, bAnd, bShr, bAnd)
     -- Junk block at top of do-scope (dead computations, not reachable by any real code path)
-    src[#src+1] = junk_block("", math.random(2, 4))
+    src[#src+1] = junk_block("", math.random(4, 8))
     -- ── Emit payload concatenation helper (decoy wrapper using allocated names) ──
     -- ── Real inline Base91 decoder (decodes the payload back to the AES blob) ──
     LF("local %s=%s", b91Alpha, _obfLitStr("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,./:;<=>?@[]^_`{|}~\""))
@@ -676,7 +730,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("      %s=-1 end end end", b91V)
     LF("  if %s>-1 then %s[#%s+1]=string.char(%s(%s(%s,%s(%s,%s)),255)) end", b91V, b91Out, b91Out, bAnd, bOr, b91B, bShl, b91V, b91N_)
     LF("  return table.concat(%s) end", b91Out)
-    src[#src+1] = junk_block("", math.random(1, 2))
+    src[#src+1] = junk_block("", math.random(3, 6))
     -- ── Emit inline AES-256-CTR decrypt ─────────────────────────────────────
     -- S-box table literal
     local sbox_vals = {0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16}
@@ -753,7 +807,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("  return table.concat(_out)")
     LF("end")
     -- Junk block between AES function and deserializer
-    src[#src+1] = junk_block("", math.random(2, 3))
+    src[#src+1] = junk_block("", math.random(4, 8))
     -- Decoy function: looks like a secondary hash/encode but is never called.
     -- Its body is all dead computation (XOR mixing on random constants).
     do
@@ -766,6 +820,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         LF("  return %s(%s,%s)", bXor, dkC, dkD)
         LF("end")
     end
+    -- Extra junk between decoy and deserializer
+    src[#src+1] = junk_block("", math.random(3, 6))
 
     -- Deserializer
     LF("local %s", dPos)
@@ -831,16 +887,18 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("  for i=0,sp-1 do pp[i]=%s() end", vLoadProto)
     LF("  return p")
     LF("end")
+    -- Extra junk after deserializer/proto-loader
+    src[#src+1] = junk_block("", math.random(3, 6))
 
     -- (dispatch table indexed by shuffled opcode – no separate revmap needed)
     -- Junk block after VM setup
-    src[#src+1] = junk_block("", math.random(1, 3))
+    src[#src+1] = junk_block("", math.random(3, 6))
 
     -- The execute function (dispatch-table based)
     LF("local function %s(%s,%s,...)", vExec, eProto, eUpvals)
     LF("  local %s=%s(...)", eArgs, vPack)
     -- Junk at function entry
-    src[#src+1] = junk_block("  ", math.random(1, 2))
+    src[#src+1] = junk_block("  ", math.random(2, 4))
     -- Allocate register boxes (auto-create missing boxes via metatable)
     LF("  local %s=setmetatable({},{__index=function(t,k) local b={};t[k]=b;return b end})", eRegs)
     LF("  for %s=0,%s.maxstacksize+63 do %s[%s]={} end", eI, eProto, eRegs, eI)
@@ -1093,7 +1151,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("  return %s(%s,1,%s)", vUnpack,eRetVals,eRetN)
     LF("end")  -- end execute function
     -- Junk block after execute function definition
-    src[#src+1] = junk_block("", math.random(2, 4))
+    src[#src+1] = junk_block("", math.random(5, 10))
 
     -- ── Main: anti-tamper, decrypt, deserialize, run ──────────
     -- The payload table (superflow_bytecode) was already emitted at the top of the file.
