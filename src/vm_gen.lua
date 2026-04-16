@@ -1028,7 +1028,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         "_must(_f1,'string.char');_must(_f2,'table.concat');_must(_f3,'loader');_must(_f4,'pcall');_must(_f5,'tostring');" ..
         "local function _vf(_f,_tag) " ..
           "if type(_sd)=='function' then local _ok,_dumped=pcall(_sd,_f);if _ok and type(_dumped)=='string' and #_dumped>0 then error('Catify: env logger detected ('.._tag..':dump)',0) end end;" ..
-          "if type(_gi)=='function' then local _ok,_inf=pcall(_gi,_f,'S');if _ok and type(_inf)=='table' then local _w=rawget(_inf,'what');local _s=rawget(_inf,'source');if (_w~=nil and _w~='C') or (type(_s)=='string' and _s~='[C]') then error('Catify: env logger detected ('.._tag..':wrapped)',0) end end end " ..
+          "if type(_gi)=='function' then local _ok,_inf=pcall(_gi,_f,'S');if _ok and type(_inf)=='table' then local _w=rawget(_inf,'what');local _s=rawget(_inf,'source');if _tag~='string.char' and ((_w~=nil and _w~='C') or (type(_s)=='string' and _s~='[C]')) then error('Catify: env logger detected ('.._tag..':wrapped)',0) end end end " ..
         "end;" ..
         "_vf(_f1,'string.char');_vf(_f2,'table.concat');_vf(_f3,'loader');_vf(_f4,'pcall');_vf(_f5,'tostring') end"
     LF(string.format(early_env_guard, env_expr))
