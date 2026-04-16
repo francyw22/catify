@@ -1106,7 +1106,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     end
     -- Obfuscate the integrity-check error message so it doesn't appear as plaintext.
     do
-        local emsg = "[RUNTIME_ERROR] Catif: intg?ity ch4k failed"
+        local emsg = "[RUNTIME_ERROR] Catify: intg?ity ch4k failed"
         local emask = math.random(1, 255)
         local eparts = {}
         for i = 1, #emsg do eparts[i] = _obfByte(emsg:byte(i) ~ emask) end
