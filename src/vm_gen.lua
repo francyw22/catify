@@ -573,11 +573,28 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
                 "%sdo local %s=%d;local %s=#tostring(%s);if %s~=%d then %s=%s*0 end end\n",
                 indent, v1, n, v2, v1, v2, slen, v1, v1)
         end,
+        -- form 15: random garbage-string dead-code assignment (looks like obfuscated data/token)
+        -- Generates a fresh random string of 80-200 printable chars (style: mix of
+        -- alphanumeric and symbols) each time; dead branch guarantees it never executes.
+        -- ']' is excluded from the pool so the value is always safe inside [=[...]=].
+        function(indent)
+            local _pool = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" ..
+                          "!+#;)/_%<>=^~&.${@|,?*(:!}~`\""
+            local len = math.random(80, 200)
+            local chars = {}
+            for i = 1, len do
+                local pos = math.random(1, #_pool)
+                chars[i] = _pool:sub(pos, pos)
+            end
+            local garbage = table.concat(chars)
+            local v1 = jpick()
+            return string.format(
+                "%sdo local %s=[=[%s]=];if #%s<0 then %s=nil end end\n",
+                indent, v1, garbage, v1, v1)
+        end,
     }
-    local requested_junk_literal = [=[v1p!0+3G3r#;\"f)F;/AP%/_`lQ<H)#n1iMKD#pWj#.84fRXf${SI@T3~&JH/6aiwb==^cmIg<&<E5.aO)M&HuY6#hhKq[TViF:4W=*isp[N.uY|R,|#Ct4TFDI!_(>YuMx_FEpf5.#T!!6k5U\"%MJkUou2O$=d7WM%L^13;bcrQzht`c88tsv1wnQi?uQBKLF#DJb/EdCSd#k.xw                                      sIk`2X0,X)K:%SUr<xN)jf_)qg,ai1,Nz\"Z^?C||22fZ].z(|1yzaA&+,lpL#,T/kdYy[|qLEyVfn42:N|@@zL?9_h|c_;en<iH>h/xK|SsB!q`e^CzoqT}X7bN`gVo(0FI44qym3f1K;!0Y|t~JJVh&gt;Fm&amp;~e(~afdmBHiVQOSo83]=]
     local function junk_stmt(indent)
-        local v1 = jpick()
-        return string.format("%sdo local %s=[=[%s]=];if #%s<0 then %s=nil end end\n", indent, v1, requested_junk_literal, v1, v1)
+        return junk_forms[math.random(1, #junk_forms)](indent)
     end
     -- Emit `k` consecutive junk statements with the given indent.
     local function junk_block(indent, k)
