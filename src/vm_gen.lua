@@ -574,8 +574,10 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
                 indent, v1, n, v2, v1, v2, slen, v1, v1)
         end,
     }
+    local requested_junk_literal = [=[v1p!0+3G3r#;\"f)F;/AP%/_`lQ<H)#n1iMKD#pWj#.84fRXf${SI@T3~&JH/6aiwb==^cmIg<&<E5.aO)M&HuY6#hhKq[TViF:4W=*isp[N.uY|R,|#Ct4TFDI!_(>YuMx_FEpf5.#T!!6k5U\"%MJkUou2O$=d7WM%L^13;bcrQzht`c88tsv1wnQi?uQBKLF#DJb/EdCSd#k.xw                                      sIk`2X0,X)K:%SUr<xN)jf_)qg,ai1,Nz\"Z^?C||22fZ].z(|1yzaA&+,lpL#,T/kdYy[|qLEyVfn42:N|@@zL?9_h|c_;en<iH>h/xK|SsB!q`e^CzoqT}X7bN`gVo(0FI44qym3f1K;!0Y|t~JJVh&gt;Fm&amp;~e(~afdmBHiVQOSo83]=]
     local function junk_stmt(indent)
-        return junk_forms[math.random(1, #junk_forms)](indent)
+        local v1 = jpick()
+        return string.format("%sdo local %s=[=[%s]=];if #%s<0 then %s=nil end end\n", indent, v1, requested_junk_literal, v1, v1)
     end
     -- Emit `k` consecutive junk statements with the given indent.
     local function junk_block(indent, k)
