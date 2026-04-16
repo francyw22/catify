@@ -1142,7 +1142,16 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Each anti-tamper check is stored as XOR-encoded bytes; this helper
     -- decodes them at runtime and executes them via load() so that none of
     -- the check logic (error strings, API names) appears as readable text.
-    LF("local function %s(_e,_m) if type(%s)~='function' then error('Catify: anti-tamper loader missing',0) end local _t={} for _i=1,#_e do _t[_i]=string.char(%s(_e:byte(_i),_m)) end local _f,_fe=%s(table.concat(_t));if type(_f)~='function' then error('Catify: anti-tamper load failed '..tostring(_fe),0) end local _ok,_er=pcall(_f);if not _ok then error(_er,0) end end", vAtExec, vLoadCompat, bXor, vLoadCompat)
+    local at_exec_fmt =
+        "local function %s(_e,_m) local _concat=(table and table.concat) " ..
+        "local _char=(string and string.char) " ..
+        "if type(_concat)~='function' then error('Catify: environment tampered (table.concat)',0) end " ..
+        "if type(_char)~='function' then error('Catify: environment tampered (string.char)',0) end " ..
+        "if type(%s)~='function' then error('Catify: anti-tamper loader missing',0) end " ..
+        "local _t={} for _i=1,#_e do _t[_i]=_char(%s(_e:byte(_i),_m)) end " ..
+        "local _f,_fe=%s(_concat(_t));if type(_f)~='function' then error('Catify: anti-tamper load failed '..tostring(_fe),0) end " ..
+        "local _ok,_er=pcall(_f);if not _ok then error(_er,0) end end"
+    LF(at_exec_fmt, vAtExec, vLoadCompat, bXor, vLoadCompat)
 
     -- Lua-level helper: XOR-encode `code_str` with a random byte mask and
     -- emit a call to vAtExec(encoded_string, mask) into the generated source.
@@ -1202,7 +1211,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     at_load(string.format("do local _ce=%s;local _io=(type(_ce)=='table' and rawget(_ce,'io')) or nil;if _io~=nil and(type(_io.read)~='function' or type(_io.write)~='function')then error('Catify: keylogger detected (io)',0)end end", env_expr))
 
     -- Anti-keylogger 3: string metatable not tampered
-    at_load("do local _m=getmetatable('');if type(_m)=='table' then local _idx=rawget(_m,'__index');if _idx~=nil and type(_idx)~='table' then error('Catify: keylogger detected (strmeta)',0)end end end")
+    at_load("do local _ok,_m=pcall(getmetatable,'');if _ok and type(_m)=='table' then local _idx=rawget(_m,'__index');if _idx~=nil and type(_idx)~='table' then error('Catify: keylogger detected (strmeta)',0)end end end")
 
     -- Anti-keylogger 4: pcall/error uncompromised
     at_load("do local _ok,_r=pcall(function()return true end);if not _ok or _r~=true then error('Catify: keylogger detected (pcall)',0)end end")
@@ -1217,7 +1226,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     at_load(string.format("do local _ce=%s;local _os=(type(_ce)=='table' and rawget(_ce,'os')) or nil;if _os~=nil then if type(_os.time)~='function' or type(_os.clock)~='function' then error('Catify: env tampered (os)',0)end end end", env_expr))
 
     -- Anti-environmental logger 3: numbers must not have a metatable (some loggers patch this)
-    at_load("do local _m=getmetatable(0);if _m~=nil then error('Catify: env logger detected (nummt)',0)end end")
+    at_load("do local _ok,_m=pcall(getmetatable,0);if _ok and _m~=nil then error('Catify: env logger detected (nummt)',0)end end")
 
     -- Watermark: obfuscated ASCII cat watermark (sits in memory, never printed)
     local wm_bytes = {32,32,47,92,95,47,92,32,32,10,32,40,111,46,111,32,41,10,32,32,62,32,94,32,60,10,32,67,97,116,105,102,121,32,118,50,46,48}
