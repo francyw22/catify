@@ -263,6 +263,27 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     end
     -- Watermark variable name
     local vWm       = vn()
+    -- Extra randomized temp names for emitted anti-tamper/decode/watermark/key assembly code
+    local atHashEnc = vn()
+    local atHashDec = vn()
+    local atHashI = vn()
+    local atErrEnc = vn()
+    local atErrDec = vn()
+    local atErrI = vn()
+    local atEnvTbl = vn()
+    local wmTbl = vn()
+    local wmI = vn()
+    local wmV = vn()
+    local keyTbl = vn()
+    local keyMask1 = vn()
+    local keyMask2 = vn()
+    local keyMask3 = vn()
+    local keyMask4 = vn()
+    local keyIdx = vn()
+    local nonceTbl = vn()
+    local nonceMask1 = vn()
+    local nonceMask2 = vn()
+    local nonceIdx = vn()
     -- Bootstrap helper aliases
     local bsToStr   = vn()
     local bsType    = vn()
@@ -1124,8 +1145,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         end
         local hmask_expr = _obfInt(hmask)
         local hraw = table.concat(hchunks, "..")
-        LF("do local _eh=%s local _hd={} for _i=1,#_eh do _hd[_i]=string.char(%s(_eh:byte(_i),%s)) end %s=table.concat(_hd) end",
-           hraw, bXor, hmask_expr, atShaExp)
+        LF("do local %s=%s local %s={} for %s=1,#%s do %s[%s]=string.char(%s(%s:byte(%s),%s)) end %s=table.concat(%s) end",
+           atHashEnc, hraw, atHashDec, atHashI, atHashEnc, atHashDec, atHashI, bXor, atHashEnc, atHashI, hmask_expr, atShaExp, atHashDec)
     end
     -- Obfuscate the integrity-check error message so it doesn't appear as plaintext.
     do
@@ -1143,11 +1164,11 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         -- The XOR decode is inlined as a function expression; emask is obfuscated.
         local emask_expr = _obfInt(emask)
         local eraw = table.concat(echunks, "..")
-        LF("if %s~=%s then local _em=%s local _ed={} for _i=1,#_em do _ed[_i]=string.char(%s(_em:byte(_i),%s)) end error(table.concat(_ed),0) end",
-           atSha, atShaExp, eraw, bXor, emask_expr)
+        LF("if %s~=%s then local %s=%s local %s={} for %s=1,#%s do %s[%s]=string.char(%s(%s:byte(%s),%s)) end error(table.concat(%s),0) end",
+           atSha, atShaExp, atErrEnc, eraw, atErrDec, atErrI, atErrEnc, atErrDec, atErrI, bXor, atErrEnc, atErrI, emask_expr, atErrDec)
     end
 
-    local env_expr = "((function() local _e=((type(_ENV)=='table' and _ENV) or (type(getfenv)=='function' and getfenv(0)) or (type(_G)=='table' and _G) or {}); return (type(_e)=='table' and _e) or {} end)())"
+    local env_expr = string.format("((function() local %s=((type(_ENV)=='table' and _ENV) or (type(getfenv)=='function' and getfenv(0)) or (type(_G)=='table' and _G) or {}); return (type(%s)=='table' and %s) or {} end)())", atEnvTbl, atEnvTbl, atEnvTbl)
 
     -- Stealth anti-tamper
     LF("local %s = false", atTrig)
@@ -1216,32 +1237,32 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local wm_bytes = {32,32,47,92,95,47,92,32,32,10,32,40,111,46,111,32,41,10,32,32,62,32,94,32,60,10,32,67,97,116,105,102,121,32,118,50,46,48}
     local wm_parts = {}
     for i = 1, #wm_bytes do wm_parts[i] = tostring(wm_bytes[i]) end
-    LF("local %s=table.concat((function()local _t={};for _i,_v in ipairs({%s})do _t[_i]=string.char(_v)end;return _t end)())",
-       vWm, table.concat(wm_parts, ","))
+    LF("local %s=table.concat((function()local %s={};for %s,%s in ipairs({%s})do %s[%s]=string.char(%s)end;return %s end)())",
+       vWm, wmTbl, wmI, wmV, table.concat(wm_parts, ","), wmTbl, wmI, wmV, wmTbl)
 
     -- Decrypt and deserialize
     -- Assemble the real key from 4 pre-masked chunks (runtime unmask).
     -- Assemble the real nonce from 2 pre-masked chunks.
     -- Both forward-declared earlier; wiped immediately after use.
     LF("do")
-    LF("  local _kt={}")
-    LF("  local _km1=%s;for _j=1,8 do _kt[_j]=string.char(%s(%s:byte(_j),_km1))end",
-       _obfInt(km[1]), bXor, vKp1)
-    LF("  local _km2=%s;for _j=1,8 do _kt[8+_j]=string.char(%s(%s:byte(_j),_km2))end",
-       _obfInt(km[2]), bXor, vKp2)
-    LF("  local _km3=%s;for _j=1,8 do _kt[16+_j]=string.char(%s(%s:byte(_j),_km3))end",
-       _obfInt(km[3]), bXor, vKp3)
-    LF("  local _km4=%s;for _j=1,8 do _kt[24+_j]=string.char(%s(%s:byte(_j),_km4))end",
-       _obfInt(km[4]), bXor, vKp4)
-    LF("  %s=table.concat(_kt)", vKey)
-    LF("  %s=nil;%s=nil;%s=nil;%s=nil;_kt=nil", vKp1, vKp2, vKp3, vKp4)
-    LF("  local _nt={}")
-    LF("  local _nm1=%s;for _j=1,4 do _nt[_j]=string.char(%s(%s:byte(_j),_nm1))end",
-       _obfInt(nm[1]), bXor, vNp1)
-    LF("  local _nm2=%s;for _j=1,4 do _nt[4+_j]=string.char(%s(%s:byte(_j),_nm2))end",
-       _obfInt(nm[2]), bXor, vNp2)
-    LF("  %s=table.concat(_nt)", vNonce)
-    LF("  %s=nil;%s=nil;_nt=nil", vNp1, vNp2)
+    LF("  local %s={}", keyTbl)
+    LF("  local %s=%s;for %s=1,8 do %s[%s]=string.char(%s(%s:byte(%s),%s))end",
+       keyMask1, _obfInt(km[1]), keyIdx, keyTbl, keyIdx, bXor, vKp1, keyIdx, keyMask1)
+    LF("  local %s=%s;for %s=1,8 do %s[8+%s]=string.char(%s(%s:byte(%s),%s))end",
+       keyMask2, _obfInt(km[2]), keyIdx, keyTbl, keyIdx, bXor, vKp2, keyIdx, keyMask2)
+    LF("  local %s=%s;for %s=1,8 do %s[16+%s]=string.char(%s(%s:byte(%s),%s))end",
+       keyMask3, _obfInt(km[3]), keyIdx, keyTbl, keyIdx, bXor, vKp3, keyIdx, keyMask3)
+    LF("  local %s=%s;for %s=1,8 do %s[24+%s]=string.char(%s(%s:byte(%s),%s))end",
+       keyMask4, _obfInt(km[4]), keyIdx, keyTbl, keyIdx, bXor, vKp4, keyIdx, keyMask4)
+    LF("  %s=table.concat(%s)", vKey, keyTbl)
+    LF("  %s=nil;%s=nil;%s=nil;%s=nil;%s=nil", vKp1, vKp2, vKp3, vKp4, keyTbl)
+    LF("  local %s={}", nonceTbl)
+    LF("  local %s=%s;for %s=1,4 do %s[%s]=string.char(%s(%s:byte(%s),%s))end",
+       nonceMask1, _obfInt(nm[1]), nonceIdx, nonceTbl, nonceIdx, bXor, vNp1, nonceIdx, nonceMask1)
+    LF("  local %s=%s;for %s=1,4 do %s[4+%s]=string.char(%s(%s:byte(%s),%s))end",
+       nonceMask2, _obfInt(nm[2]), nonceIdx, nonceTbl, nonceIdx, bXor, vNp2, nonceIdx, nonceMask2)
+    LF("  %s=table.concat(%s)", vNonce, nonceTbl)
+    LF("  %s=nil;%s=nil;%s=nil", vNp1, vNp2, nonceTbl)
     LF("end")
     LF("%s=%s(%s,%s,%s)", vBlob, vDecrypt, vBlob, vKey, vNonce)
     LF("%s=nil;%s=nil;%s=nil;%s=nil;%s=nil", vKey, vNonce, vDecrypt, vDk1, vDk2)   -- wipe key, nonce, decryptor, decoys
