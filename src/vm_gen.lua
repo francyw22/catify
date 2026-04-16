@@ -125,7 +125,7 @@ end
 -- Base91 uses only safe printable ASCII characters, making the output resilient
 -- to any third-party tool that processes or re-encodes the generated Lua file.
 local PAYLOAD_VAR_NAME = "superflow_bytecode"
-local ANTI_TAMPER_CHECK_COUNT = 20
+local ANTI_TAMPER_CHECK_COUNT = 26
 local function emit_payload_b91(b91str)
     -- Declare as local inside the wrapper function so it doesn't pollute global scope.
     return "local " .. PAYLOAD_VAR_NAME .. "=" .. string.format("%q", b91str) .. ";"
@@ -1208,12 +1208,26 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("    %s:Destroy()", atFolder)
     LF("    local %s = game:GetService('HttpService')", atHttp)
     LF("    local %s = typeof(%s) == 'Instance' and %s.ClassName == 'HttpService' and typeof(%s.GenerateGUID) == 'function'", atCheckVars[20], atHttp, atHttp, atHttp)
+    -- Check 21: game has no Lua-level proxy metatable (getmetatable returns nil for Roblox Instances)
+    LF("    local %s = getmetatable(game) == nil", atCheckVars[21])
+    -- Check 22: Vector3 is a native Roblox/Luau type not present in plain Lua
+    LF("    local %s = typeof(Vector3.new(1, 2, 3)) == 'Vector3' and Vector3.new(1, 2, 3).Magnitude > 0", atCheckVars[22])
+    -- Check 23: Color3 is a native Roblox/Luau type
+    LF("    local %s = typeof(Color3.new(0, 0, 0)) == 'Color3'", atCheckVars[23])
+    -- Check 24: ReplicatedStorage must exist as a real Roblox service
+    LF("    local %s = game:GetService('ReplicatedStorage').ClassName == 'ReplicatedStorage'", atCheckVars[24])
+    -- Check 25: game.PlaceId is a numeric DataModel property (not present in plain Lua)
+    LF("    local %s = typeof(game.PlaceId) == 'number'", atCheckVars[25])
+    -- Check 26: Enum.NormalId is a distinct Roblox enum with real EnumItems
+    LF("    local %s = typeof(Enum.NormalId.Front) == 'EnumItem' and Enum.NormalId.Front.Value == 0", atCheckVars[26])
     LF("    local %s = {", atChecks)
     LF("        %s, %s, %s, %s,", atCheckVars[1], atCheckVars[2], atCheckVars[3], atCheckVars[4])
     LF("        %s, %s, %s, %s,", atCheckVars[5], atCheckVars[6], atCheckVars[7], atCheckVars[8])
     LF("        %s, %s, %s, %s,", atCheckVars[9], atCheckVars[10], atCheckVars[11], atCheckVars[12])
     LF("        %s, %s, %s, %s,", atCheckVars[13], atCheckVars[14], atCheckVars[15], atCheckVars[16])
-    LF("        %s, %s, %s, %s", atCheckVars[17], atCheckVars[18], atCheckVars[19], atCheckVars[20])
+    LF("        %s, %s, %s, %s,", atCheckVars[17], atCheckVars[18], atCheckVars[19], atCheckVars[20])
+    LF("        %s, %s, %s, %s,", atCheckVars[21], atCheckVars[22], atCheckVars[23], atCheckVars[24])
+    LF("        %s, %s", atCheckVars[25], atCheckVars[26])
     LF("    }")
     LF("    local %s = 0", atPassed)
     LF("    for _, %s in ipairs(%s) do", atChkVal, atChecks)

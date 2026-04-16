@@ -14,7 +14,7 @@ heavily protected VM bytecode targeting **Roblox Luau** runtime.
 | **AES-256-CTR encryption** | Bytecode payload encrypted with a fresh 32-byte key + 8-byte nonce per run |
 | **Base91 payload** | Encrypted blob encoded as a single compact Base91 string (`superflow_bytecode`) |
 | **SHA-256 integrity** | Runtime SHA-256 check on the encrypted blob (8 obfuscated word comparisons) |
-| **Stealth anti-tamper** | 20 runtime checks for Roblox/Luau object, signal, timing, enum, task, service, and GUID integrity |
+| **Stealth anti-tamper** | 26 runtime checks for Roblox/Luau object, signal, timing, enum, task, service, type, GUID, and metatable integrity |
 | **Junk injection** | Dead-code statements sprinkled throughout the VM dispatch loop |
 | **ASCII cat watermark** | Obfuscated watermark string embedded in generated output |
 
