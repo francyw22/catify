@@ -1142,7 +1142,16 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Each anti-tamper check is stored as XOR-encoded bytes; this helper
     -- decodes them at runtime and executes them via load() so that none of
     -- the check logic (error strings, API names) appears as readable text.
-    LF("local function %s(_e,_m) local _concat=(table and table.concat) or nil local _char=(string and string.char) or nil if type(_concat)~='function' then error('Catify: environment tampered (table.concat)',0) end if type(_char)~='function' then error('Catify: environment tampered (string.char)',0) end if type(%s)~='function' then error('Catify: anti-tamper loader missing',0) end local _t={} for _i=1,#_e do _t[_i]=_char(%s(_e:byte(_i),_m)) end local _f,_fe=%s(_concat(_t));if type(_f)~='function' then error('Catify: anti-tamper load failed '..tostring(_fe),0) end local _ok,_er=pcall(_f);if not _ok then error(_er,0) end end", vAtExec, vLoadCompat, bXor, vLoadCompat)
+    local at_exec_fmt =
+        "local function %s(_e,_m) local _concat=(table and table.concat) or nil " ..
+        "local _char=(string and string.char) or nil " ..
+        "if type(_concat)~='function' then error('Catify: environment tampered (table.concat)',0) end " ..
+        "if type(_char)~='function' then error('Catify: environment tampered (string.char)',0) end " ..
+        "if type(%s)~='function' then error('Catify: anti-tamper loader missing',0) end " ..
+        "local _t={} for _i=1,#_e do _t[_i]=_char(%s(_e:byte(_i),_m)) end " ..
+        "local _f,_fe=%s(_concat(_t));if type(_f)~='function' then error('Catify: anti-tamper load failed '..tostring(_fe),0) end " ..
+        "local _ok,_er=pcall(_f);if not _ok then error(_er,0) end end"
+    LF(at_exec_fmt, vAtExec, vLoadCompat, bXor, vLoadCompat)
 
     -- Lua-level helper: XOR-encode `code_str` with a random byte mask and
     -- emit a call to vAtExec(encoded_string, mask) into the generated source.
