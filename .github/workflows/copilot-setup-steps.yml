@@ -26,10 +26,16 @@ jobs:
           lua -v
 
       - name: Install Luau CLI
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           api_url="https://api.github.com/repos/luau-lang/luau/releases/latest"
-          asset_url="$(curl -fsSL "$api_url" | python3 -c '
+          api_headers=(-H "Accept: application/vnd.github+json" -H "User-Agent: catify-setup")
+          if [ -n "${GITHUB_TOKEN:-}" ]; then
+            api_headers+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+          fi
+          asset_url="$(curl -fsSL "${api_headers[@]}" "$api_url" | python3 -c '
 import json, re, sys
 data = json.load(sys.stdin)
 assets = data.get("assets", [])
