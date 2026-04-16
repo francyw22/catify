@@ -251,8 +251,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local atEnv1    = vn()
     local atEnv2    = vn()
     local atEnv3    = vn()
-    -- Anti-tamper block executor (XOR decoder + load())
-    local vAtExec   = vn()
+    -- (vAtExec removed: each at_load now emits its own unique inline decode block)
     -- SHA-256 integrity check variable names
     local atSha     = vn()
     local atShaExp  = vn()
@@ -992,6 +991,27 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- ── Main: anti-tamper, decrypt, deserialize, run ──────────
     -- The payload table (superflow_bytecode) was already emitted at the top of the file.
 
+    local env_expr = "((function() local _e=((type(_ENV)=='table' and _ENV) or (type(getfenv)=='function' and getfenv(0)) or (type(_G)=='table' and _G) or {}); return (type(_e)=='table' and _e) or {} end)())"
+
+    -- Early anti-envlogger guard: run before key/nonce assembly so wrapped
+    -- builtins cannot observe useful decrypted/materialized data.
+    local early_env_guard =
+        "do local _ce=%s;local _d=(type(_ce)=='table' and rawget(_ce,'debug')) or nil;" ..
+        "local _gi=(type(_d)=='table' and rawget(_d,'getinfo')) or nil;" ..
+        "local _sd=(type(string)=='table' and rawget(string,'dump')) or nil;" ..
+        "local _loader=(type(load)=='function' and load) or (type(loadstring)=='function' and loadstring) or nil;" ..
+        "local _f1=(type(string)=='table' and rawget(string,'char')) or nil;" ..
+        "local _f2=(type(table)=='table' and rawget(table,'concat')) or nil;" ..
+        "local _f3=_loader;local _f4=pcall;local _f5=tostring;" ..
+        "local function _must(_f,_tag) if type(_f)~='function' then error('Catify: environment tampered (early '.._tag..')',0) end end;" ..
+        "_must(_f1,'string.char');_must(_f2,'table.concat');_must(_f3,'loader');_must(_f4,'pcall');_must(_f5,'tostring');" ..
+        "local function _vf(_f,_tag) " ..
+          "if type(_sd)=='function' then local _ok,_dumped=pcall(_sd,_f);if _ok and type(_dumped)=='string' and #_dumped>0 then error('Catify: env logger detected ('.._tag..':dump)',0) end end;" ..
+          "if type(_gi)=='function' then local _ok,_inf=pcall(_gi,_f,'S');if _ok and type(_inf)=='table' then local _w=rawget(_inf,'what');local _s=rawget(_inf,'source');if (_w~=nil and _w~='C') or (type(_s)=='string' and _s~='[C]') then error('Catify: env logger detected ('.._tag..':wrapped)',0) end end end " ..
+        "end;" ..
+        "_vf(_f1,'string.char');_vf(_f2,'table.concat');_vf(_f3,'loader');_vf(_f4,'pcall');_vf(_f5,'tostring') end"
+    LF(string.format(early_env_guard, env_expr))
+
     -- AES key split into 4 × 8-byte chunks with per-chunk runtime XOR masks.
     -- Each chunk's bytes are pre-XOR'd with a session mask at codegen time so
     -- evaluating the string.char() expressions only yields the masked (wrong) bytes.
@@ -1142,31 +1162,26 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
            atSha, atShaExp, eraw, bXor, emask_expr)
     end
 
-    -- ── Anti-tamper block executor: XOR-decode + load() ─────────────────────
-    -- Each anti-tamper check is stored as XOR-encoded bytes; this helper
-    -- decodes them at runtime and executes them via load() so that none of
-    -- the check logic (error strings, API names) appears as readable text.
-    local at_exec_fmt =
-        "local function %s(_e,_m) local _concat=(table and table.concat) " ..
-        "local _char=(string and string.char) " ..
-        "if type(_concat)~='function' then error('Catify: environment tampered (table.concat)',0) end " ..
-        "if type(_char)~='function' then error('Catify: environment tampered (string.char)',0) end " ..
-        "if type(%s)~='function' then error('Catify: anti-tamper loader missing',0) end " ..
-        "local _t={} for _i=1,#_e do _t[_i]=_char(%s(_e:byte(_i),_m)) end " ..
-        "local _f,_fe=%s(_concat(_t));if type(_f)~='function' then error('Catify: anti-tamper load failed '..tostring(_fe),0) end " ..
-        "local _ok,_er=pcall(_f);if not _ok then error(_er,0) end end"
-    LF(at_exec_fmt, vAtExec, vLoadCompat, bXor, vLoadCompat)
-
-    -- Lua-level helper: XOR-encode `code_str` with a random byte mask and
-    -- emit a call to vAtExec(encoded_string, mask) into the generated source.
-    -- Bytes are split into chunks of at most 60 to stay within Lua's register limit.
+    -- ── Per-check inline decoders (no shared executor) ───────────────────────
+    -- Each anti-tamper check is encoded independently with a random multi-byte
+    -- rolling key and decoded by a self-contained inline do-block that uses
+    -- freshly generated variable names and a randomly selected loop structure.
+    -- Without a shared executor function there is no single extraction point
+    -- that a static analyzer can reuse across all checks.
     local AT_CHUNK = 60
     local function at_load(code_str)
-        local mask = math.random(1, 255)
+        local klen = math.random(4, 12)
+        local key = {}
+        for i = 1, klen do key[i] = math.random(1, 255) end
+
+        -- Rolling-XOR encode the payload
         local all_parts = {}
         for i = 1, #code_str do
-            all_parts[i] = _obfByte(code_str:byte(i) ~ mask)
+            local ki = ((i - 1) % klen) + 1
+            all_parts[i] = _obfByte(code_str:byte(i) ~ key[ki])
         end
+
+        -- Split into AT_CHUNK-byte chunks for the data string expression
         local chunks = {}
         for i = 1, #all_parts, AT_CHUNK do
             local chunk = {}
@@ -1175,10 +1190,56 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
             end
             chunks[#chunks + 1] = string.format("string.char(%s)", table.concat(chunk, ","))
         end
-        LF("%s(%s,%s)", vAtExec, table.concat(chunks, ".."), _obfInt(mask))
-    end
+        local data_expr = table.concat(chunks, "..")
 
-    local env_expr = "((function() local _e=((type(_ENV)=='table' and _ENV) or (type(getfenv)=='function' and getfenv(0)) or (type(_G)=='table' and _G) or {}); return (type(_e)=='table' and _e) or {} end)())"
+        -- Obfuscate the key bytes as string.char(...)
+        local key_parts = {}
+        for i = 1, klen do key_parts[i] = _obfByte(key[i]) end
+        local key_expr = string.format("string.char(%s)", table.concat(key_parts, ","))
+
+        -- Fresh variable names for this block — nothing is reused across calls
+        local vE  = vn()  -- encoded data
+        local vK  = vn()  -- rolling key string
+        local vN  = vn()  -- key length
+        local vT  = vn()  -- decode buffer table
+        local vI  = vn()  -- loop index
+        local vF  = vn()  -- loaded function
+        local vFe = vn()  -- load() error value
+        local vOk = vn()  -- pcall success flag
+        local vEr = vn()  -- pcall error value
+
+        -- Pick a random decode loop structure so no two checks look alike
+        local style = math.random(1, 3)
+        local decode_loop
+        if style == 1 then
+            -- Variant A: plain numeric for-loop
+            decode_loop = string.format(
+                "local %s={} for %s=1,#%s do %s[%s]=string.char(%s(%s:byte(%s),%s:byte((%s-1)%%%s+1))) end",
+                vT, vI, vE, vT, vI, bXor, vE, vI, vK, vI, vN)
+        elseif style == 2 then
+            -- Variant B: while-loop with an explicit counter
+            decode_loop = string.format(
+                "local %s={};local %s=1 while %s<=#%s do %s[%s]=string.char(%s(%s:byte(%s),%s:byte((%s-1)%%%s+1)));%s=%s+1 end",
+                vT, vI, vI, vE, vT, vI, bXor, vE, vI, vK, vI, vN, vI, vI)
+        else
+            -- Variant C: for-loop with an intermediate local for the raw byte
+            local vB = vn()
+            decode_loop = string.format(
+                "local %s={} for %s=1,#%s do local %s=%s:byte(%s);%s[%s]=string.char(%s(%s,%s:byte((%s-1)%%%s+1))) end",
+                vT, vI, vE, vB, vE, vI, vT, vI, bXor, vB, vK, vI, vN)
+        end
+
+        -- Emit the self-contained do-block in readable pieces
+        local block_head = string.format("do local %s=%s local %s=%s local %s=#%s ",
+            vE, data_expr, vK, key_expr, vN, vK)
+        local block_load = string.format("local %s,%s=%s(table.concat(%s)) ",
+            vF, vFe, vLoadCompat, vT)
+        local block_check = string.format("if type(%s)~='function' then error(tostring(%s),0) end ",
+            vF, vFe)
+        local block_run = string.format("local %s,%s=pcall(%s) if not %s then error(%s,0) end end",
+            vOk, vEr, vF, vOk, vEr)
+        LF("%s%s%s%s%s", block_head, decode_loop .. " ", block_load, block_check, block_run)
+    end
 
     -- Anti-tamper 2: debug hook detection (self-contained, wrapped in pcall for Roblox)
     at_load(string.format("do local _d;pcall(function() local _ce=%s;if type(_ce)=='table' then _d=rawget(_ce,'debug') end end);if _d and type(_d)=='table' and type(_d.gethook)=='function' then local _ok,_v=pcall(_d.gethook,_d);if _ok and _v~=nil then error('Catify: debug hook detected',0) end end end", env_expr))
