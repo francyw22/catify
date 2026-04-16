@@ -1367,7 +1367,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
        vExec, vProto, vEnv)
     L("end)(...)")
 
-    -- ── Compact post-processing: strip indentation and keep line boundaries ───
+    -- ── Compact post-processing: strip indentation and emit single-line output ─
     local full = table.concat(src)
     local compact_lines = {}
     for line in full:gmatch("[^\n]+") do
@@ -1380,9 +1380,9 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
             compact_lines[#compact_lines + 1] = trimmed
         end
     end
-    -- Single-line header comment (matches the compact AstrarServices output style)
-    local header = "-- This file was protected by Catify v2.0.0\n"
-    return header .. table.concat(compact_lines, "\n")
+    -- Keep header without introducing a newline that would create a second line.
+    local header = "--[[ This file was protected by Catify v2.0.0 ]] "
+    return header .. table.concat(compact_lines, " ")
 end
 
 return VmGen
