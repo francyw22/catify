@@ -992,6 +992,12 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- ── Main: anti-tamper, decrypt, deserialize, run ──────────
     -- The payload table (superflow_bytecode) was already emitted at the top of the file.
 
+    local env_expr = "((function() local _e=((type(_ENV)=='table' and _ENV) or (type(getfenv)=='function' and getfenv(0)) or (type(_G)=='table' and _G) or {}); return (type(_e)=='table' and _e) or {} end)())"
+
+    -- Early anti-envlogger guard: run before key/nonce assembly so wrapped
+    -- builtins cannot observe useful decrypted/materialized data.
+    LF(string.format("do local _ce=%s;local _d=(type(_ce)=='table' and rawget(_ce,'debug')) or nil;local _gi=(type(_d)=='table' and rawget(_d,'getinfo')) or nil;local _sd=(type(string)=='table' and rawget(string,'dump')) or nil;local _loader=(type(load)=='function' and load) or (type(loadstring)=='function' and loadstring) or nil;local _f1=(type(string)=='table' and rawget(string,'char')) or nil;local _f2=(type(table)=='table' and rawget(table,'concat')) or nil;local _f3=_loader;local _f4=pcall;local _f5=tostring;if type(_f1)~='function' or type(_f2)~='function' or type(_f3)~='function' or type(_f4)~='function' or type(_f5)~='function' then error('Catify: environment tampered (early core)',0) end;local function _vf(_f,_tag) if type(_sd)=='function' then local _ok=pcall(_sd,_f);if _ok then error('Catify: env logger detected ('.._tag..':dump)',0) end end;if type(_gi)=='function' then local _ok,_inf=pcall(_gi,_f,'S');if _ok and type(_inf)=='table' then local _w=rawget(_inf,'what');local _s=rawget(_inf,'source');if (_w~=nil and _w~='C') or (type(_s)=='string' and _s~='[C]') then error('Catify: env logger detected ('.._tag..':wrapped)',0) end end end end;_vf(_f1,'string.char');_vf(_f2,'table.concat');_vf(_f3,'loader');_vf(_f4,'pcall');_vf(_f5,'tostring') end", env_expr))
+
     -- AES key split into 4 × 8-byte chunks with per-chunk runtime XOR masks.
     -- Each chunk's bytes are pre-XOR'd with a session mask at codegen time so
     -- evaluating the string.char() expressions only yields the masked (wrong) bytes.
@@ -1177,8 +1183,6 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         end
         LF("%s(%s,%s)", vAtExec, table.concat(chunks, ".."), _obfInt(mask))
     end
-
-    local env_expr = "((function() local _e=((type(_ENV)=='table' and _ENV) or (type(getfenv)=='function' and getfenv(0)) or (type(_G)=='table' and _G) or {}); return (type(_e)=='table' and _e) or {} end)())"
 
     -- Anti-tamper 2: debug hook detection (self-contained, wrapped in pcall for Roblox)
     at_load(string.format("do local _d;pcall(function() local _ce=%s;if type(_ce)=='table' then _d=rawget(_ce,'debug') end end);if _d and type(_d)=='table' and type(_d.gethook)=='function' then local _ok,_v=pcall(_d.gethook,_d);if _ok and _v~=nil then error('Catify: debug hook detected',0) end end end", env_expr))
