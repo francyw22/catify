@@ -48,6 +48,7 @@ const PREFIX       = process.env.CATIFY_PREFIX || "!";
 const PASSES       = Math.max(1, Math.min(2, parseInt(process.env.CATIFY_PASSES  || "1", 10)));
 const MAX_INLINE   = parseInt(process.env.CATIFY_MAX_INLINE || String(32  * 1024), 10);
 const MAX_FILE     = parseInt(process.env.CATIFY_MAX_FILE   || String(512 * 1024), 10);
+// Generated protected outputs are substantially larger than tiny/invalid fragments; this guards obvious bad outputs.
 const MIN_PROTECTED_OUTPUT_LENGTH = 200;
 
 if (!TOKEN) {
@@ -85,6 +86,11 @@ function truncate(s, max) {
     return s.slice(0, max - 3) + "...";
 }
 
+/**
+ * Validate minimal structural integrity of Catify output before replying to the user.
+ * @param {string} content
+ * @returns {boolean}
+ */
 function hasValidProtectedOutput(content) {
     if (typeof content !== "string" || content.length === 0) return false;
     if (content.length < MIN_PROTECTED_OUTPUT_LENGTH) return false;
@@ -100,6 +106,11 @@ function hasValidProtectedOutput(content) {
     return true;
 }
 
+/**
+ * Build output attachment name by appending `_catified` and preserving extension.
+ * @param {string} inputName
+ * @returns {string}
+ */
 function buildOutputAttachmentName(inputName) {
     const parsed = path.parse(inputName || "catified.lua");
     const ext = parsed.ext || ".lua";
