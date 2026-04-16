@@ -1184,6 +1184,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
 
     -- Anti-tamper 4: runtime must be Roblox Luau only.
     -- Use string.find(...) instead of method syntax to avoid __index/method-hook issues.
+    -- The 4th arg `true` in string.find forces plain-text search (no Lua patterns).
     local luau_runtime_check =
         "do local _v=_VERSION;" ..
         "local _sf=(type(string)=='table' and string.find) or nil;" ..
