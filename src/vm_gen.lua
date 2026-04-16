@@ -324,53 +324,64 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         elseif mode == 4 then
             return utils.obfuscate_int(n)
         elseif mode == 5 then
-            return utils.obfuscate_int_deep(n, bXor)
+            -- Pure arithmetic triple-sum: n = a + b + (n-a-b), no XOR
+            local a = math.random(1, 0x3FFF)
+            local b = math.random(1, 0x3FFF)
+            return string.format("(%d+%d+%d)", a, b, n - a - b)
         end
     end
     local function _obfByte(n)
-        return string.format("%s(%s,255)", bAnd, _obfInt(n))
+        -- Alternate between bitwise-AND mask and arithmetic modulo to vary patterns.
+        if math.random(0, 1) == 0 then
+            return string.format("%s(%s,255)", bAnd, _obfInt(n))
+        else
+            return string.format("(%s%%256)", _obfInt(n))
+        end
     end
-    -- _obfLitStr: emit a self-contained IIFE that recovers the original string via
-    -- a rolling-XOR decode loop at runtime.  Approach:
-    --   1. Pick a random N-byte rolling key  (N = 3-8, chosen fresh per call).
-    --   2. XOR each plaintext byte with key[(i-1)%N + 1] → ciphertext.
-    --   3. Emit both key bytes and ciphertext bytes through _obfByte (arithmetic noise + band mask).
-    --   4. The runtime loop: string.char(bXor(cipher[i], key[(i-1)%N+1])) recovers the byte.
-    -- This is much stronger than the previous flat string.char() approach because:
-    --   • No single byte's value is visible in isolation.
-    --   • Recovering the plaintext requires evaluating the full loop AND the key.
-    --   • Each call produces a unique key, so identical strings differ across protected files.
+    -- _obfLitStr: emit a self-contained IIFE that recovers the original string at runtime.
+    -- Two encoding strategies are chosen at random per call to break repetitive patterns:
+    --   Strategy 0 (rolling XOR): cipher[i] = plain[i] XOR key[(i-1)%klen+1]
+    --     decode: bXor(d[i], k[(i-1)%#k+1])
+    --   Strategy 1 (rolling add-sub): cipher[i] = (plain[i] + key[(i-1)%klen+1]) % 256
+    --     decode: (d[i] - k[(i-1)%#k+1]) % 256  (pure arithmetic, no bXor)
+    -- Both strategies use _obfByte for per-byte obfuscation (arithmetic noise + mask).
+    -- Each call produces a unique key, so identical strings differ across protected files.
     local function _obfLitStr(s)
         if #s == 0 then return '""' end
-        -- Fresh random key for this string.
+        -- Fresh random key and strategy for this string.
         local klen = math.random(3, 8)
         local key = {}
         for i = 1, klen do key[i] = math.random(0, 255) end
-        -- XOR-encrypt the plaintext bytes with the rolling key.
+        local strategy = math.random(0, 1)
         local cipher = {}
-        for i = 1, #s do
-            cipher[i] = s:byte(i) ~ key[((i - 1) % klen) + 1]
+        if strategy == 0 then
+            -- Rolling XOR encryption
+            for i = 1, #s do
+                cipher[i] = s:byte(i) ~ key[((i - 1) % klen) + 1]
+            end
+        else
+            -- Rolling add-mod-256 encryption
+            for i = 1, #s do
+                cipher[i] = (s:byte(i) + key[((i - 1) % klen) + 1]) % 256
+            end
         end
-        -- Obfuscate each key byte and cipher byte with _obfByte (arithmetic + band mask).
+        -- Obfuscate each key byte and cipher byte through _obfByte.
         local kparts, dparts = {}, {}
-        for i = 1, klen  do kparts[i] = _obfByte(key[i])    end
+        for i = 1, klen    do kparts[i] = _obfByte(key[i])    end
         for i = 1, #cipher do dparts[i] = _obfByte(cipher[i]) end
-        -- Build the IIFE without string.format to avoid escaping the literal '%' modulo operator.
-        -- Template (for readability):
-        --   (function()
-        --     local _k = { <obfuscated key bytes> }
-        --     local _d = { <obfuscated cipher bytes> }
-        --     local _o = {}
-        --     for _i = 1, #_d do
-        --       _o[_i] = string.char( bXor(_d[_i], _k[(_i-1) % #_k + 1]) )
-        --     end
-        --     return table.concat(_o)
-        --   end)()
-        local kArr    = table.concat(kparts, ",")
-        local dArr    = table.concat(dparts, ",")
-        local decLoop = "};local _o={};for _i=1,#_d do _o[_i]=string.char("
-                     .. bXor .. "(_d[_i],_k[(_i-1)%#_k+1]))end;return table.concat(_o)end)()"
-        return "(function()local _k={" .. kArr .. "};local _d={" .. dArr .. decLoop
+        -- Build the IIFE without string.format to avoid escaping the literal '%' operator.
+        local kArr = table.concat(kparts, ",")
+        local dArr = table.concat(dparts, ",")
+        if strategy == 0 then
+            -- Decode: bXor(d[i], k[(i-1)%#k+1])
+            local decLoop = "};local _o={};for _i=1,#_d do _o[_i]=string.char("
+                         .. bXor .. "(_d[_i],_k[(_i-1)%#_k+1]))end;return table.concat(_o)end)()"
+            return "(function()local _k={" .. kArr .. "};local _d={" .. dArr .. decLoop
+        else
+            -- Decode: (d[i] - k[(i-1)%#k+1]) % 256 — pure arithmetic, no bXor call
+            local decLoop = "};local _o={};for _i=1,#_d do _o[_i]=string.char((_d[_i]-_k[(_i-1)%#_k+1])%256)end;return table.concat(_o)end)()"
+            return "(function()local _k={" .. kArr .. "};local _d={" .. dArr .. decLoop
+        end
     end
     -- Like _obfLitStr but emits only plain arithmetic (no bAnd/bXor references).
     -- Safe to use BEFORE the bitwise compat block has been emitted in the output.
@@ -526,6 +537,41 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
             return string.format(
                 "%sdo local %s=%q;local %s=string.upper(%s);if #%s<0 then %s=%s end end\n",
                 indent, v1, w, v2, v1, v2, v1, v2)
+        end,
+        -- form 11: integer division identity (no bXor) – b * (a // b) == a when divisible
+        function(indent)
+            local v1, v2 = jpick2()
+            local b = math.random(2, 9)
+            local q = math.random(1, 100)
+            local a = q * b  -- a is always divisible by b, so a // b == q
+            return string.format(
+                "%sdo local %s=%d;local %s=%s//%d;if %s~=%d then %s=%s*0 end end\n",
+                indent, v1, a, v2, v1, b, v2, q, v1, v1)
+        end,
+        -- form 12: string.byte + string.char round-trip identity (no bXor)
+        function(indent)
+            local v1, v2 = jpick2()
+            local bval = math.random(65, 90)  -- ASCII A-Z
+            return string.format(
+                "%sdo local %s=string.char(%d);local %s=string.byte(%s);if %s~=%d then %s=nil end end\n",
+                indent, v1, bval, v2, v1, v2, bval, v1)
+        end,
+        -- form 13: math.floor identity – floor of an integer is itself (no bXor)
+        function(indent)
+            local v1 = jpick()
+            local n = math.random(5, 9999)
+            return string.format(
+                "%sdo local %s=%d;if math.floor(%s)~=%s then %s=%s+1 end end\n",
+                indent, v1, n, v1, v1, v1, v1)
+        end,
+        -- form 14: tostring + # length identity (no bXor)
+        function(indent)
+            local v1, v2 = jpick2()
+            local n = math.random(10, 9999)
+            local slen = #tostring(n)
+            return string.format(
+                "%sdo local %s=%d;local %s=#tostring(%s);if %s~=%d then %s=%s*0 end end\n",
+                indent, v1, n, v2, v1, v2, slen, v1, v1)
         end,
     }
     local function junk_stmt(indent)
@@ -1185,94 +1231,13 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
 
     local env_expr = string.format("((function() local %s=((type(_ENV)=='table' and _ENV) or (type(getfenv)=='function' and getfenv(0)) or (type(_G)=='table' and _G) or {}); return (type(%s)=='table' and %s) or {} end)())", atEnvTbl, atEnvTbl, atEnvTbl)
 
-    -- Stealth anti-tamper (all string literals obfuscated via _obfLitStr)
-    LF("local %s = false", atTrig)
-    LF("local %s = pcall(function()", atOk)
-    LF("    local %s = game.ClassName == %s", atCheckVars[1], _obfLitStr("DataModel"))
-    LF("    local %s = workspace.ClassName == %s", atCheckVars[2], _obfLitStr("Workspace"))
-    LF("    local %s = typeof(Enum.Material.Plastic) == %s", atCheckVars[3], _obfLitStr("EnumItem"))
-    LF("    local %s = Enum.Material.Plastic.Value == 256", atCheckVars[4])
-    LF("    local %s = typeof(game.Changed) == %s", atCheckVars[5], _obfLitStr("RBXScriptSignal"))
-    LF("    local %s = typeof(workspace.Changed) == %s", atCheckVars[6], _obfLitStr("RBXScriptSignal"))
-    LF("    local %s = game:GetService(%s)", atRs, _obfLitStr("RunService"))
-    LF("    local %s = %s.ClassName == %s", atCheckVars[7], atRs, _obfLitStr("RunService"))
-    LF("    local %s = typeof(%s.Heartbeat) == %s", atCheckVars[8], atRs, _obfLitStr("RBXScriptSignal"))
-    LF("    local %s = %s:IsClient() ~= %s:IsServer()", atCheckVars[9], atRs, atRs)
-    LF("    local %s = Instance.new(%s)", atPart, _obfLitStr("Part"))
-    LF("    local %s = typeof(%s) == %s and %s.ClassName == %s", atCheckVars[10], atPart, _obfLitStr("Instance"), atPart, _obfLitStr("Part"))
-    LF("    %s:Destroy()", atPart)
-    LF("    local %s = workspace:GetFullName() == %s", atCheckVars[11], _obfLitStr("Workspace"))
-    LF("    local %s = CFrame.new(1, 2, 3)", atCf)
-    LF("    local %s = %s.X == 1 and %s.Y == 2 and %s.Z == 3", atCheckVars[12], atCf, atCf, atCf)
-    LF("    local %s = workspace.DistributedGameTime", atT1)
-    LF("    task.wait(0.1)")
-    LF("    local %s = workspace.DistributedGameTime", atT2)
-    LF("    local %s = (%s - %s) > 0", atCheckVars[13], atT2, atT1)
-    LF("    local %s, %s = pcall(function()", atGuidOk, atGuid)
-    LF("        return game:GetService(%s):GenerateGUID(false)", _obfLitStr("HttpService"))
-    LF("    end)")
-    LF("    local %s = %s and #%s == 36 and %s:sub(9,9) == %s", atCheckVars[14], atGuidOk, atGuid, atGuid, _obfLitStr("-"))
-    LF("    local %s = Enum.Material:GetEnumItems()", atMaterialEnums)
-    LF("    local %s = typeof(%s) == %s and #%s > 0", atCheckVars[15], atMaterialEnums, _obfLitStr("table"), atMaterialEnums)
-    LF("    local %s = typeof(task.spawn) == %s and typeof(task.delay) == %s", atCheckVars[16], _obfLitStr("function"), _obfLitStr("function"))
-    LF("    local %s = typeof(game.GetService) == %s and typeof(game.FindFirstChild) == %s", atCheckVars[17], _obfLitStr("function"), _obfLitStr("function"))
-    LF("    local %s = game:GetService(%s)", atPlayers, _obfLitStr("Players"))
-    LF("    local %s = typeof(%s) == %s and %s.ClassName == %s", atCheckVars[18], atPlayers, _obfLitStr("Instance"), atPlayers, _obfLitStr("Players"))
-    LF("    local %s = Instance.new(%s)", atFolder, _obfLitStr("Folder"))
-    LF("    local %s = typeof(%s) == %s and %s.ClassName == %s", atCheckVars[19], atFolder, _obfLitStr("Instance"), atFolder, _obfLitStr("Folder"))
-    LF("    %s:Destroy()", atFolder)
-    LF("    local %s = game:GetService(%s)", atHttp, _obfLitStr("HttpService"))
-    LF("    local %s = typeof(%s) == %s and %s.ClassName == %s and typeof(%s.GenerateGUID) == %s", atCheckVars[20], atHttp, _obfLitStr("Instance"), atHttp, _obfLitStr("HttpService"), atHttp, _obfLitStr("function"))
-    -- Check 21: game has no Lua-level proxy metatable
-    LF("    local %s = getmetatable(game) == nil", atCheckVars[21])
-    -- Check 22: Vector3 is a native Roblox/Luau type and arithmetic is real
-    LF("    local %s = typeof(Vector3.new(1, 2, 3)) == %s and Vector3.new(1, 2, 3).Magnitude > 0", atCheckVars[22], _obfLitStr("Vector3"))
-    -- Check 23: Color3 is a native Roblox/Luau type
-    LF("    local %s = typeof(Color3.new(0, 0, 0)) == %s", atCheckVars[23], _obfLitStr("Color3"))
-    -- Check 24: ReplicatedStorage must exist as a real Roblox service
-    LF("    local %s = game:GetService(%s).ClassName == %s", atCheckVars[24], _obfLitStr("ReplicatedStorage"), _obfLitStr("ReplicatedStorage"))
-    -- Check 25: game.PlaceId is a numeric DataModel property
-    LF("    local %s = typeof(game.PlaceId) == %s", atCheckVars[25], _obfLitStr("number"))
-    -- Check 26: Enum.NormalId is a distinct Roblox enum with exact value
-    LF("    local %s = typeof(Enum.NormalId.Front) == %s and Enum.NormalId.Front.Value == 0", atCheckVars[26], _obfLitStr("EnumItem"))
-    -- Check 27: TweenInfo is a native Roblox/Luau constructor type
-    LF("    local %s = typeof(TweenInfo.new(1)) == %s", atCheckVars[27], _obfLitStr("TweenInfo"))
-    -- Check 28: BrickColor is a native Roblox/Luau type
-    LF("    local %s = typeof(BrickColor.new(%s)) == %s", atCheckVars[28], _obfLitStr("Medium stone gray"), _obfLitStr("BrickColor"))
-    -- Check 29: Lighting service exists as a real Roblox service
-    LF("    local %s = game:GetService(%s)", atLighting, _obfLitStr("Lighting"))
-    LF("    local %s = typeof(%s) == %s and %s.ClassName == %s", atCheckVars[29], atLighting, _obfLitStr("Instance"), atLighting, _obfLitStr("Lighting"))
-    -- Check 30: CFrame default look vector is (0,0,-1) — a real CFrame-specific property
-    LF("    local %s = CFrame.new(0, 0, 0).LookVector == Vector3.new(0, 0, -1)", atCheckVars[30])
-    -- Check 31: game.JobId is a string property (DataModel-specific)
-    LF("    local %s = typeof(game.JobId) == %s", atCheckVars[31], _obfLitStr("string"))
-    -- Check 32: Enum.KeyCode with exact numeric value (hard to spoof without enum implementation)
-    LF("    local %s = typeof(Enum.KeyCode.A) == %s and Enum.KeyCode.A.Value == 65", atCheckVars[32], _obfLitStr("EnumItem"))
-    LF("    local %s = {", atChecks)
-    LF("        %s, %s, %s, %s,", atCheckVars[1], atCheckVars[2], atCheckVars[3], atCheckVars[4])
-    LF("        %s, %s, %s, %s,", atCheckVars[5], atCheckVars[6], atCheckVars[7], atCheckVars[8])
-    LF("        %s, %s, %s, %s,", atCheckVars[9], atCheckVars[10], atCheckVars[11], atCheckVars[12])
-    LF("        %s, %s, %s, %s,", atCheckVars[13], atCheckVars[14], atCheckVars[15], atCheckVars[16])
-    LF("        %s, %s, %s, %s,", atCheckVars[17], atCheckVars[18], atCheckVars[19], atCheckVars[20])
-    LF("        %s, %s, %s, %s,", atCheckVars[21], atCheckVars[22], atCheckVars[23], atCheckVars[24])
-    LF("        %s, %s, %s, %s,", atCheckVars[25], atCheckVars[26], atCheckVars[27], atCheckVars[28])
-    LF("        %s, %s, %s, %s", atCheckVars[29], atCheckVars[30], atCheckVars[31], atCheckVars[32])
-    LF("    }")
-    LF("    local %s = 0", atPassed)
-    LF("    for _, %s in ipairs(%s) do", atChkVal, atChecks)
-    LF("        if %s then %s = %s + 1 end", atChkVal, atPassed, atPassed)
-    LF("    end")
-    LF("    if %s < #%s then", atPassed, atChecks)
-    LF("        %s = true", atTrig)
-    LF("    end")
+    -- Minimal anti-tamper surface: only verify delayed callback availability.
+    LF("local %s, %s = pcall(function()", atOk, atChkVal)
+    LF("    return typeof(task) == %s and typeof(task.delay) == %s", _obfLitStr("table"), _obfLitStr("function"))
     LF("end)")
-    LF("if not %s then", atOk)
-    LF("    %s = true", atTrig)
-    LF("end")
+    LF("local %s = not (%s and %s)", atTrig, atOk, atChkVal)
     LF("if %s then", atTrig)
-    LF("    task.delay(math.random(6, 7), function()")
-    LF("        print('Detected by catify :3')")
-    LF("    end)")
+    LF("    print('Detected by catify :3')")
     LF("    return")
     LF("end")
 
