@@ -324,53 +324,64 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         elseif mode == 4 then
             return utils.obfuscate_int(n)
         elseif mode == 5 then
-            return utils.obfuscate_int_deep(n, bXor)
+            -- Pure arithmetic triple-sum: n = a + b + (n-a-b), no XOR
+            local a = math.random(1, 0x3FFF)
+            local b = math.random(1, 0x3FFF)
+            return string.format("(%d+%d+%d)", a, b, n - a - b)
         end
     end
     local function _obfByte(n)
-        return string.format("%s(%s,255)", bAnd, _obfInt(n))
+        -- Alternate between bitwise-AND mask and arithmetic modulo to vary patterns.
+        if math.random(0, 1) == 0 then
+            return string.format("%s(%s,255)", bAnd, _obfInt(n))
+        else
+            return string.format("(%s%%256)", _obfInt(n))
+        end
     end
-    -- _obfLitStr: emit a self-contained IIFE that recovers the original string via
-    -- a rolling-XOR decode loop at runtime.  Approach:
-    --   1. Pick a random N-byte rolling key  (N = 3-8, chosen fresh per call).
-    --   2. XOR each plaintext byte with key[(i-1)%N + 1] → ciphertext.
-    --   3. Emit both key bytes and ciphertext bytes through _obfByte (arithmetic noise + band mask).
-    --   4. The runtime loop: string.char(bXor(cipher[i], key[(i-1)%N+1])) recovers the byte.
-    -- This is much stronger than the previous flat string.char() approach because:
-    --   • No single byte's value is visible in isolation.
-    --   • Recovering the plaintext requires evaluating the full loop AND the key.
-    --   • Each call produces a unique key, so identical strings differ across protected files.
+    -- _obfLitStr: emit a self-contained IIFE that recovers the original string at runtime.
+    -- Two encoding strategies are chosen at random per call to break repetitive patterns:
+    --   Strategy 0 (rolling XOR): cipher[i] = plain[i] XOR key[(i-1)%klen+1]
+    --     decode: bXor(d[i], k[(i-1)%#k+1])
+    --   Strategy 1 (rolling add-sub): cipher[i] = (plain[i] + key[(i-1)%klen+1]) % 256
+    --     decode: (d[i] - k[(i-1)%#k+1]) % 256  (pure arithmetic, no bXor)
+    -- Both strategies use _obfByte for per-byte obfuscation (arithmetic noise + mask).
+    -- Each call produces a unique key, so identical strings differ across protected files.
     local function _obfLitStr(s)
         if #s == 0 then return '""' end
-        -- Fresh random key for this string.
+        -- Fresh random key and strategy for this string.
         local klen = math.random(3, 8)
         local key = {}
         for i = 1, klen do key[i] = math.random(0, 255) end
-        -- XOR-encrypt the plaintext bytes with the rolling key.
+        local strategy = math.random(0, 1)
         local cipher = {}
-        for i = 1, #s do
-            cipher[i] = s:byte(i) ~ key[((i - 1) % klen) + 1]
+        if strategy == 0 then
+            -- Rolling XOR encryption
+            for i = 1, #s do
+                cipher[i] = s:byte(i) ~ key[((i - 1) % klen) + 1]
+            end
+        else
+            -- Rolling add-mod-256 encryption
+            for i = 1, #s do
+                cipher[i] = (s:byte(i) + key[((i - 1) % klen) + 1]) % 256
+            end
         end
-        -- Obfuscate each key byte and cipher byte with _obfByte (arithmetic + band mask).
+        -- Obfuscate each key byte and cipher byte through _obfByte.
         local kparts, dparts = {}, {}
-        for i = 1, klen  do kparts[i] = _obfByte(key[i])    end
+        for i = 1, klen    do kparts[i] = _obfByte(key[i])    end
         for i = 1, #cipher do dparts[i] = _obfByte(cipher[i]) end
-        -- Build the IIFE without string.format to avoid escaping the literal '%' modulo operator.
-        -- Template (for readability):
-        --   (function()
-        --     local _k = { <obfuscated key bytes> }
-        --     local _d = { <obfuscated cipher bytes> }
-        --     local _o = {}
-        --     for _i = 1, #_d do
-        --       _o[_i] = string.char( bXor(_d[_i], _k[(_i-1) % #_k + 1]) )
-        --     end
-        --     return table.concat(_o)
-        --   end)()
-        local kArr    = table.concat(kparts, ",")
-        local dArr    = table.concat(dparts, ",")
-        local decLoop = "};local _o={};for _i=1,#_d do _o[_i]=string.char("
-                     .. bXor .. "(_d[_i],_k[(_i-1)%#_k+1]))end;return table.concat(_o)end)()"
-        return "(function()local _k={" .. kArr .. "};local _d={" .. dArr .. decLoop
+        -- Build the IIFE without string.format to avoid escaping the literal '%' operator.
+        local kArr = table.concat(kparts, ",")
+        local dArr = table.concat(dparts, ",")
+        if strategy == 0 then
+            -- Decode: bXor(d[i], k[(i-1)%#k+1])
+            local decLoop = "};local _o={};for _i=1,#_d do _o[_i]=string.char("
+                         .. bXor .. "(_d[_i],_k[(_i-1)%#_k+1]))end;return table.concat(_o)end)()"
+            return "(function()local _k={" .. kArr .. "};local _d={" .. dArr .. decLoop
+        else
+            -- Decode: (d[i] - k[(i-1)%#k+1]) % 256 — pure arithmetic, no bXor call
+            local decLoop = "};local _o={};for _i=1,#_d do _o[_i]=string.char((_d[_i]-_k[(_i-1)%#_k+1])%256)end;return table.concat(_o)end)()"
+            return "(function()local _k={" .. kArr .. "};local _d={" .. dArr .. decLoop
+        end
     end
     -- Like _obfLitStr but emits only plain arithmetic (no bAnd/bXor references).
     -- Safe to use BEFORE the bitwise compat block has been emitted in the output.
@@ -526,6 +537,41 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
             return string.format(
                 "%sdo local %s=%q;local %s=string.upper(%s);if #%s<0 then %s=%s end end\n",
                 indent, v1, w, v2, v1, v2, v1, v2)
+        end,
+        -- form 11: integer division identity (no bXor) – b * (a // b) == a when divisible
+        function(indent)
+            local v1, v2 = jpick2()
+            local b = math.random(2, 9)
+            local q = math.random(1, 100)
+            local a = q * b  -- a is always divisible by b, so a // b == q
+            return string.format(
+                "%sdo local %s=%d;local %s=%s//%d;if %s~=%d then %s=%s*0 end end\n",
+                indent, v1, a, v2, v1, b, v2, q, v1, v1)
+        end,
+        -- form 12: string.byte + string.char round-trip identity (no bXor)
+        function(indent)
+            local v1, v2 = jpick2()
+            local bval = math.random(65, 90)  -- ASCII A-Z
+            return string.format(
+                "%sdo local %s=string.char(%d);local %s=string.byte(%s);if %s~=%d then %s=nil end end\n",
+                indent, v1, bval, v2, v1, v2, bval, v1)
+        end,
+        -- form 13: math.floor identity – floor of an integer is itself (no bXor)
+        function(indent)
+            local v1 = jpick()
+            local n = math.random(5, 9999)
+            return string.format(
+                "%sdo local %s=%d;if math.floor(%s)~=%s then %s=%s+1 end end\n",
+                indent, v1, n, v1, v1, v1, v1)
+        end,
+        -- form 14: tostring + # length identity (no bXor)
+        function(indent)
+            local v1, v2 = jpick2()
+            local n = math.random(10, 9999)
+            local slen = #tostring(n)
+            return string.format(
+                "%sdo local %s=%d;local %s=#tostring(%s);if %s~=%d then %s=%s*0 end end\n",
+                indent, v1, n, v2, v1, v2, slen, v1, v1)
         end,
     }
     local function junk_stmt(indent)
