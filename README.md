@@ -1,7 +1,7 @@
 # Catify — Lua Script Protector
 
-**Catify** is a commercial-grade Lua 5.3 obfuscator that transforms scripts into self-contained,
-heavily protected VM bytecode — matching the `superflow_bytecode` format used by Luarmor V4.
+**Catify** is a commercial-grade obfuscator that transforms scripts into self-contained,
+heavily protected VM bytecode targeting **Roblox Luau** runtime.
 
 ---
 

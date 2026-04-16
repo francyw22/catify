@@ -1182,8 +1182,9 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Anti-tamper 3: critical global integrity check
     at_load("do local _loader=(type(load)=='function' and load) or (type(loadstring)=='function' and loadstring);local _req={tostring=tostring,type=type,pcall=pcall,string=string,table=table};for _k,_v in pairs(_req) do if _v==nil then error('Catify: environment tampered ('.._k..')',0) end end;if type(_loader)~='function' then error('Catify: environment tampered (loader)',0) end end")
 
-    -- Anti-tamper 4: Lua version must be 5.1, 5.2, 5.3, 5.4, or Roblox Luau
-    at_load("do local _v=_VERSION;if not(_v and(_v:find('5%.1') or _v:find('5%.2') or _v:find('5%.3') or _v:find('5%.4') or _v:find('Luau')))then error('Catify: unsupported Lua version',0) end end")
+    -- Anti-tamper 4: runtime must be Roblox Luau only.
+    -- Use string.find(...) instead of method syntax to avoid __index/method-hook issues.
+    at_load("do local _v=_VERSION;local _sf=(type(string)=='table' and string.find) or nil;if type(_v)~='string' or type(_sf)~='function' or _sf(_v,'Luau',1,true)==nil then error('Catify: unsupported runtime (Roblox Luau required)',0) end end")
 
     -- Anti-tamper 5: core standard functions must be genuine callable values
     at_load("do local _t={rawequal,rawget,rawset,select,ipairs,pairs,next,table.unpack or unpack};if rawlen~=nil then _t[#_t+1]=rawlen end;for _,_f in ipairs(_t) do if type(_f)~='function' then error('Catify: environment tampered (core)',0) end end end")
