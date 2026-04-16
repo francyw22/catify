@@ -296,10 +296,12 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local vNp2 = vn()   -- nonce bytes 5-8, pre-XOR'd with nonce mask 2
     local vDk1 = vn()   -- decoy key fragment 1 (never used for real decryption)
     local vDk2 = vn()   -- decoy key fragment 2 (never used for real decryption)
-    -- Bitwise compat helpers: use bit32 (Roblox Luau) or native ops loaded via load()
-    -- (native ops in load() strings bypass Luau's parser so older Luau versions work too)
+    -- Bitwise compat helpers: use randomized helper identifiers so fixed
+    -- helper signatures don't appear in output.
+    -- Native ops in load() strings bypass Luau's parser so older Luau versions work too.
     local bXor, bNot, bAnd, bOr, bShl, bShr =
-        "__bxor_catify", "__bnot_catify", "__band_catify", "__bor_catify", "__bshl_catify", "__bshr_catify"
+        "__" .. vn() .. "_catify", "__" .. vn() .. "_catify", "__" .. vn() .. "_catify",
+        "__" .. vn() .. "_catify", "__" .. vn() .. "_catify", "__" .. vn() .. "_catify"
     local vLoadCompat = vn() -- load/loadstring runtime loader
     local vPack = vn()       -- table.pack compat
     local vUnpack = vn()     -- table.unpack compat
