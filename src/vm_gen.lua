@@ -1184,7 +1184,15 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
 
     -- Anti-tamper 4: runtime must be Roblox Luau only.
     -- Use string.find(...) instead of method syntax to avoid __index/method-hook issues.
-    at_load("do local _v=_VERSION;local _sf=(type(string)=='table' and string.find) or nil;if type(_v)~='string' or type(_sf)~='function' or _sf(_v,'Luau',1,true)==nil then error('Catify: unsupported runtime (Roblox Luau required)',0) end end")
+    local luau_runtime_check =
+        "do local _v=_VERSION;" ..
+        "local _sf=(type(string)=='table' and string.find) or nil;" ..
+        "local _ok_v=(type(_v)=='string');" ..
+        "local _ok_sf=(type(_sf)=='function');" ..
+        "local _is_luau=(_ok_v and _ok_sf and _sf(_v,'Luau',1,true)~=nil);" ..
+        "if not _is_luau then error('Catify: unsupported runtime (Roblox Luau required)',0) end " ..
+        "end"
+    at_load(luau_runtime_check)
 
     -- Anti-tamper 5: core standard functions must be genuine callable values
     at_load("do local _t={rawequal,rawget,rawset,select,ipairs,pairs,next,table.unpack or unpack};if rawlen~=nil then _t[#_t+1]=rawlen end;for _,_f in ipairs(_t) do if type(_f)~='function' then error('Catify: environment tampered (core)',0) end end end")
