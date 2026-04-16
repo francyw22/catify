@@ -1187,7 +1187,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
 
     -- Minimal anti-tamper surface: only verify delayed callback availability.
     LF("local %s, %s = pcall(function()", atOk, atTrig)
-    LF("    return typeof(task) == 'table' and typeof(task.delay) == 'function'")
+    LF("    return typeof(task) == %s and typeof(task.delay) == %s", _obfLitStr("table"), _obfLitStr("function"))
     LF("end)")
     LF("if not %s or not %s then", atOk, atTrig)
     LF("    task.delay(math.random(6, 7), function()")
