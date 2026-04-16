@@ -290,19 +290,19 @@ function Utils.obfuscate_int_triple(n, xorname)
     local b = a ~ n
     local c = math.random(0, 0x1FFFFFFF)
     local d = c ~ b
-    -- (a XOR (c XOR d)) XOR b  ==  a XOR b  ==  n
+    -- xorname(a, xorname(c, d)) == a XOR (c XOR b) == a XOR b == n
+    -- (c XOR d = c XOR (c XOR b) = b, so the inner xorname yields b, outer yields a XOR b = n)
     local form = math.random(1, 3)
     if xorname then
         -- Emit function-call syntax compatible with all Lua versions
         if form == 1 then
-            return string.format("(%s(%s(%d,%s(%d,%d)),%d))", xorname, xorname, a, xorname, c, d, b)
+            return string.format("(%s(%d,%s(%d,%d)))", xorname, a, xorname, c, d)
         elseif form == 2 then
             local p = math.random(1, 0x7FFF)
-            return string.format("((%s(%s(%d,%s(%d,%d)),%d))+%d-%d)", xorname, xorname, a, xorname, c, d, b, p, p)
+            return string.format("((%s(%d,%s(%d,%d)))+%d-%d)", xorname, a, xorname, c, d, p, p)
         else
             local p = math.random(1, 0x3FFF)
-            local q = math.random(1, 0x3FFF)
-            return string.format("(%s(%s(%d,%s(%d,(%d+%d-%d))),%d))", xorname, xorname, a, xorname, c, d, p, p, b)
+            return string.format("(%s(%d,%s(%d,(%d+%d-%d))))", xorname, a, xorname, c, d, p, p)
         end
     else
         -- No xorname: pre-compute XOR and use arithmetic-only noise
