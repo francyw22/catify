@@ -153,10 +153,18 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
 
     -- ── 2. Generate random identifiers for all locals ───────────────────────
     -- We need ~80 unique names for VM internals
-    local N  = utils.rand_names(200)
+    local N  = utils.rand_names(220)
+    local used_names = {}
+    for i = 1, #N do used_names[N[i]] = true end
     local ni = 0
     local function vn()   -- "variable name"
         ni = ni + 1
+        if ni > #N then
+            local extra
+            repeat extra = utils.rand_name() until not used_names[extra]
+            used_names[extra] = true
+            N[#N + 1] = extra
+        end
         return N[ni]
     end
 
@@ -1346,7 +1354,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
        vExec, vProto, vEnv)
     L("end)(...)")
 
-    -- ── Compact post-processing: strip indentation and join lines ────────────
+    -- ── Compact post-processing: strip indentation and keep line boundaries ───
     local full = table.concat(src)
     local compact_lines = {}
     for line in full:gmatch("[^\n]+") do
@@ -1361,7 +1369,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     end
     -- Single-line header comment (matches the compact AstrarServices output style)
     local header = "-- This file was protected by Catify v2.0.0\n"
-    return header .. table.concat(compact_lines, " ")
+    return header .. table.concat(compact_lines, "\n")
 end
 
 return VmGen
