@@ -255,6 +255,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local vAtExec   = vn()
     -- SHA-256 integrity check variable names
     local atSha     = vn()
+    local atShaExp  = vn()
     -- Watermark variable name
     local vWm       = vn()
     -- Bootstrap helper aliases
@@ -347,10 +348,6 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
 
     -- ── 3. Compute SHA-256 of the encrypted blob for anti-tamper ─────────────
     local blob_sha = utils.sha256(blob)
-    local blob_sha_words = {}
-    for i = 0, 7 do
-        blob_sha_words[i] = string.unpack(">I4", blob_sha, i*4+1)
-    end
 
     -- ── 4. Build the fwdmap (real opcode → shuffled opcode) ─────────────────
     -- The dispatch table will be indexed by shuffled opcodes so that the
@@ -1108,15 +1105,22 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Decode Base91 payload into vBlob (binary AES-encrypted blob)
     LF("local %s=%s(%s)", vBlob, b91Dec, PAYLOAD_VAR_NAME)
     LF("%s=nil", PAYLOAD_VAR_NAME)   -- wipe payload after decoding
-    -- SHA-256 integrity check: compute hash and compare 8 words
+    -- SHA-256 integrity check: compute hash and compare exact bytes
     LF("local %s=%s(%s)", atSha, shaFn, vBlob)
-    local sha_checks = {}
-    for i = 0, 7 do
-        local word_exp = _obfInt(blob_sha_words[i])
-        local off = i * 4 + 1
-        -- Extract big-endian uint32 via arithmetic (no string.unpack needed)
-        sha_checks[i+1] = string.format("(%s:byte(%d)*16777216+%s:byte(%d)*65536+%s:byte(%d)*256+%s:byte(%d)~=%s)",
-            atSha, off, atSha, off+1, atSha, off+2, atSha, off+3, word_exp)
+    do
+        local hmask = math.random(1, 255)
+        local hparts = {}
+        for i = 1, #blob_sha do hparts[i] = _obfByte(blob_sha:byte(i) ~ hmask) end
+        local hchunks = {}
+        for i = 1, #hparts, 60 do
+            local ch = {}
+            for j = i, math.min(i + 59, #hparts) do ch[#ch+1] = hparts[j] end
+            hchunks[#hchunks+1] = string.format("string.char(%s)", table.concat(ch, ","))
+        end
+        local hmask_expr = _obfInt(hmask)
+        local hraw = table.concat(hchunks, "..")
+        LF("do local _eh=%s local _hd={} for _i=1,#_eh do _hd[_i]=string.char(%s(_eh:byte(_i),%s)) end %s=table.concat(_hd) end",
+           hraw, bXor, hmask_expr, atShaExp)
     end
     -- Obfuscate the integrity-check error message so it doesn't appear as plaintext.
     do
@@ -1134,8 +1138,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         -- The XOR decode is inlined as a function expression; emask is obfuscated.
         local emask_expr = _obfInt(emask)
         local eraw = table.concat(echunks, "..")
-        LF("if %s then local _em=%s local _ed={} for _i=1,#_em do _ed[_i]=string.char(%s(_em:byte(_i),%s)) end error(table.concat(_ed),0) end",
-           table.concat(sha_checks, " or "), eraw, bXor, emask_expr)
+        LF("if %s~=%s then local _em=%s local _ed={} for _i=1,#_em do _ed[_i]=string.char(%s(_em:byte(_i),%s)) end error(table.concat(_ed),0) end",
+           atSha, atShaExp, eraw, bXor, emask_expr)
     end
 
     -- ── Anti-tamper block executor: XOR-decode + load() ─────────────────────
