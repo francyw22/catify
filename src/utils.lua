@@ -7,6 +7,14 @@ local Utils = {}
 
 -- ─── Random identifiers ──────────────────────────────────────────────────────
 
+local LUA_KEYWORDS = {
+    ["and"] = true, ["break"] = true, ["do"] = true, ["else"] = true, ["elseif"] = true,
+    ["end"] = true, ["false"] = true, ["for"] = true, ["function"] = true, ["goto"] = true,
+    ["if"] = true, ["in"] = true, ["local"] = true, ["nil"] = true, ["not"] = true,
+    ["or"] = true, ["repeat"] = true, ["return"] = true, ["then"] = true, ["true"] = true,
+    ["until"] = true, ["while"] = true,
+}
+
 --- Generate a random valid Lua identifier using short alphanumeric names.
 --- Example output: "aX", "bY3", "zKm"
 ---@param min_len integer?  minimum identifier length
@@ -27,7 +35,11 @@ function Utils.rand_name(min_len, max_len)
         local idx = math.random(1, #alnum)
         buf[#buf + 1] = alnum:sub(idx, idx)
     end
-    return table.concat(buf)
+    local name = table.concat(buf)
+    if LUA_KEYWORDS[name] then
+        return Utils.rand_name(min_len, max_len)
+    end
+    return name
 end
 
 --- Generate `count` unique random identifiers (no collisions)
