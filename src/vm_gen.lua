@@ -1142,105 +1142,58 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
            atSha, atShaExp, eraw, bXor, emask_expr)
     end
 
-    -- ── Anti-tamper block executor: XOR-decode + load() ─────────────────────
-    -- Each anti-tamper check is stored as XOR-encoded bytes; this helper
-    -- decodes them at runtime and executes them via load() so that none of
-    -- the check logic (error strings, API names) appears as readable text.
-    local at_exec_fmt =
-        "local function %s(_e,_m) local _concat=(table and table.concat) " ..
-        "local _char=(string and string.char) " ..
-        "if type(_concat)~='function' then error('Catify: environment tampered (table.concat)',0) end " ..
-        "if type(_char)~='function' then error('Catify: environment tampered (string.char)',0) end " ..
-        "if type(%s)~='function' then error('Catify: anti-tamper loader missing',0) end " ..
-        "local _t={} for _i=1,#_e do _t[_i]=_char(%s(_e:byte(_i),_m)) end " ..
-        "local _f,_fe=%s(_concat(_t));if type(_f)~='function' then error('Catify: anti-tamper load failed '..tostring(_fe),0) end " ..
-        "local _ok,_er=pcall(_f);if not _ok then error(_er,0) end end"
-    LF(at_exec_fmt, vAtExec, vLoadCompat, bXor, vLoadCompat)
-
-    -- Lua-level helper: XOR-encode `code_str` with a random byte mask and
-    -- emit a call to vAtExec(encoded_string, mask) into the generated source.
-    -- Bytes are split into chunks of at most 60 to stay within Lua's register limit.
-    local AT_CHUNK = 60
-    local function at_load(code_str)
-        local mask = math.random(1, 255)
-        local all_parts = {}
-        for i = 1, #code_str do
-            all_parts[i] = _obfByte(code_str:byte(i) ~ mask)
-        end
-        local chunks = {}
-        for i = 1, #all_parts, AT_CHUNK do
-            local chunk = {}
-            for j = i, math.min(i + AT_CHUNK - 1, #all_parts) do
-                chunk[#chunk + 1] = all_parts[j]
-            end
-            chunks[#chunks + 1] = string.format("string.char(%s)", table.concat(chunk, ","))
-        end
-        LF("%s(%s,%s)", vAtExec, table.concat(chunks, ".."), _obfInt(mask))
-    end
-
     local env_expr = "((function() local _e=((type(_ENV)=='table' and _ENV) or (type(getfenv)=='function' and getfenv(0)) or (type(_G)=='table' and _G) or {}); return (type(_e)=='table' and _e) or {} end)())"
 
-    -- Anti-tamper 2: debug hook detection (self-contained, wrapped in pcall for Roblox)
-    at_load(string.format("do local _d;pcall(function() local _ce=%s;if type(_ce)=='table' then _d=rawget(_ce,'debug') end end);if _d and type(_d)=='table' and type(_d.gethook)=='function' then local _ok,_v=pcall(_d.gethook,_d);if _ok and _v~=nil then error('Catify: debug hook detected',0) end end end", env_expr))
-
-    -- Anti-tamper 3: critical global integrity check
-    at_load("do local _loader=(type(load)=='function' and load) or (type(loadstring)=='function' and loadstring);local _req={tostring=tostring,type=type,pcall=pcall,string=string,table=table};for _k,_v in pairs(_req) do if _v==nil then error('Catify: environment tampered ('.._k..')',0) end end;if type(_loader)~='function' then error('Catify: environment tampered (loader)',0) end end")
-
-    -- Anti-tamper 4: runtime must be Roblox Luau only.
-    -- Use string.find(...) instead of method syntax to avoid __index/method-hook issues.
-    -- The 4th arg `true` in string.find forces plain-text search (no Lua patterns).
-    local luau_runtime_check =
-        "do local _v=_VERSION;" ..
-        "local _sf=(type(string)=='table' and string.find) or nil;" ..
-        "local _ok_v=(type(_v)=='string');" ..
-        "local _ok_sf=(type(_sf)=='function');" ..
-        "local _is_luau=(_ok_v and _ok_sf and _sf(_v,'Luau',1,true)~=nil);" ..
-        "if not _is_luau then error('Catify: unsupported runtime (Roblox Luau required)',0) end " ..
-        "end"
-    at_load(luau_runtime_check)
-
-    -- Anti-tamper 5: core standard functions must be genuine callable values
-    at_load("do local _t={rawequal,rawget,rawset,select,ipairs,pairs,next,table.unpack or unpack};if rawlen~=nil then _t[#_t+1]=rawlen end;for _,_f in ipairs(_t) do if type(_f)~='function' then error('Catify: environment tampered (core)',0) end end end")
-
-    -- Anti-tamper 6: type() sanity (standard type names must not be overridden)
-    at_load("do if type(nil)~='nil' or type(0)~='number' or type('')~='string' or type({})~='table' or type(type)~='function' then error('Catify: environment tampered (type)',0) end end")
-
-    -- Anti-tamper 7: string standard library sanity
-    at_load("do if string.byte('A')~=65 or string.char(65)~='A' or string.len('ab')~=2 then error('Catify: environment tampered (strlib)',0) end end")
-
-    -- Anti-tamper 8: math library sanity (math.pi is universal; maxinteger absent in Luau)
-    at_load("do if type(math.pi)~='number' or math.pi<=3 or math.pi>=4 or type(math.abs)~='function' then error('Catify: environment tampered (math)',0) end end")
-
-    -- Anti-tamper 9: table library sanity (insert/remove must be callable)
-    at_load("do if type(table.insert)~='function' or type(table.remove)~='function' or type(table.concat)~='function' then error('Catify: environment tampered (tablelib)',0) end end")
-
-    -- Anti-tamper 10: coroutine library basic check
-    at_load("do if type(coroutine)~='table' or type(coroutine.wrap)~='function' then error('Catify: environment tampered (coroutine)',0) end end")
-
-    -- Anti-keylogger 1: no active debug hook (self-contained, more thorough check)
-    at_load(string.format("do local _k;pcall(function() local _ce=%s;local _d=(type(_ce)=='table' and rawget(_ce,'debug')) or nil;if _d and type(_d.gethook)=='function' then _k=_d.gethook() end end);if _k~=nil then error('Catify: keylogger detected',0) end end", env_expr))
-
-    -- Anti-keylogger 2: io library integrity (keyloggers may replace io.read/write)
-    -- io is nil in Roblox, so the nil guard makes this a no-op there.
-    at_load(string.format("do local _ce=%s;local _io=(type(_ce)=='table' and rawget(_ce,'io')) or nil;if _io~=nil and(type(_io.read)~='function' or type(_io.write)~='function')then error('Catify: keylogger detected (io)',0)end end", env_expr))
-
-    -- Anti-keylogger 3: string metatable not tampered
-    at_load("do local _ok,_m=pcall(getmetatable,'');if _ok and type(_m)=='table' then local _idx=rawget(_m,'__index');if _idx~=nil and type(_idx)~='table' then error('Catify: keylogger detected (strmeta)',0)end end end")
-
-    -- Anti-keylogger 4: pcall/error uncompromised
-    at_load("do local _ok,_r=pcall(function()return true end);if not _ok or _r~=true then error('Catify: keylogger detected (pcall)',0)end end")
-
-    -- Anti-environmental logger 1: intentionally omitted – Roblox's executor
-    -- sandbox legitimately attaches __index to _G, which would cause a false
-    -- positive here and crash the protected script.
-
-    -- Anti-environmental logger 2: os library integrity check.
-    -- Roblox has os.time and os.clock but NOT os.getenv, so we only check
-    -- the two functions that are guaranteed to exist on all supported platforms.
-    at_load(string.format("do local _ce=%s;local _os=(type(_ce)=='table' and rawget(_ce,'os')) or nil;if _os~=nil then if type(_os.time)~='function' or type(_os.clock)~='function' then error('Catify: env tampered (os)',0)end end end", env_expr))
-
-    -- Anti-environmental logger 3: numbers must not have a metatable (some loggers patch this)
-    at_load("do local _ok,_m=pcall(getmetatable,0);if _ok and _m~=nil then error('Catify: env logger detected (nummt)',0)end end")
+    -- ProjectDiamond anti-tamper
+    LF("local ProjectDiamond_triggered = false")
+    LF("local ProjectDiamond_ok = pcall(function()")
+    LF("    local ProjectDiamond_c1 = game.ClassName == 'DataModel'")
+    LF("    local ProjectDiamond_c2 = workspace.ClassName == 'Workspace'")
+    LF("    local ProjectDiamond_c3 = typeof(Enum.Material.Plastic) == 'EnumItem'")
+    LF("    local ProjectDiamond_c4 = Enum.Material.Plastic.Value == 256")
+    LF("    local ProjectDiamond_c5 = typeof(game.Changed) == 'RBXScriptSignal'")
+    LF("    local ProjectDiamond_c6 = typeof(workspace.Changed) == 'RBXScriptSignal'")
+    LF("    local ProjectDiamond_rs = game:GetService('RunService')")
+    LF("    local ProjectDiamond_c7 = ProjectDiamond_rs.ClassName == 'RunService'")
+    LF("    local ProjectDiamond_c8 = typeof(ProjectDiamond_rs.Heartbeat) == 'RBXScriptSignal'")
+    LF("    local ProjectDiamond_c9 = ProjectDiamond_rs:IsClient() ~= ProjectDiamond_rs:IsServer()")
+    LF("    local ProjectDiamond_part = Instance.new('Part')")
+    LF("    local ProjectDiamond_c10 = typeof(ProjectDiamond_part) == 'Instance' and ProjectDiamond_part.ClassName == 'Part'")
+    LF("    ProjectDiamond_part:Destroy()")
+    LF("    local ProjectDiamond_c11 = workspace:GetFullName() == 'Workspace'")
+    LF("    local ProjectDiamond_cf = CFrame.new(1, 2, 3)")
+    LF("    local ProjectDiamond_c12 = ProjectDiamond_cf.X == 1 and ProjectDiamond_cf.Y == 2 and ProjectDiamond_cf.Z == 3")
+    LF("    local ProjectDiamond_t1 = workspace.DistributedGameTime")
+    LF("    task.wait(0.1)")
+    LF("    local ProjectDiamond_t2 = workspace.DistributedGameTime")
+    LF("    local ProjectDiamond_c13 = (ProjectDiamond_t2 - ProjectDiamond_t1) > 0")
+    LF("    local ProjectDiamond_guid_ok, ProjectDiamond_guid = pcall(function()")
+    LF("        return game:GetService('HttpService'):GenerateGUID(false)")
+    LF("    end)")
+    LF("    local ProjectDiamond_c14 = ProjectDiamond_guid_ok and #ProjectDiamond_guid == 36 and ProjectDiamond_guid:sub(9,9) == '-'")
+    LF("    local ProjectDiamond_checks = {")
+    LF("        ProjectDiamond_c1, ProjectDiamond_c2, ProjectDiamond_c3, ProjectDiamond_c4,")
+    LF("        ProjectDiamond_c5, ProjectDiamond_c6, ProjectDiamond_c7, ProjectDiamond_c8,")
+    LF("        ProjectDiamond_c9, ProjectDiamond_c10, ProjectDiamond_c11, ProjectDiamond_c12,")
+    LF("        ProjectDiamond_c13, ProjectDiamond_c14")
+    LF("    }")
+    LF("    local ProjectDiamond_passed = 0")
+    LF("    for _, ProjectDiamond_v in ipairs(ProjectDiamond_checks) do")
+    LF("        if ProjectDiamond_v then ProjectDiamond_passed = ProjectDiamond_passed + 1 end")
+    LF("    end")
+    LF("    if ProjectDiamond_passed < #ProjectDiamond_checks then")
+    LF("        ProjectDiamond_triggered = true")
+    LF("    end")
+    LF("end)")
+    LF("if not ProjectDiamond_ok then")
+    LF("    ProjectDiamond_triggered = true")
+    LF("end")
+    LF("if ProjectDiamond_triggered then")
+    LF("    task.delay(math.random(6, 7), function()")
+    LF("        print('Detected by catify :3')")
+    LF("    end)")
+    LF("    return")
+    LF("end")
 
     -- Watermark: obfuscated ASCII cat watermark (sits in memory, never printed)
     local wm_bytes = {32,32,47,92,95,47,92,32,32,10,32,40,111,46,111,32,41,10,32,32,62,32,94,32,60,10,32,67,97,116,105,102,121,32,118,50,46,48}

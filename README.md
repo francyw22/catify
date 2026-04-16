@@ -14,9 +14,7 @@ heavily protected VM bytecode targeting **Roblox Luau** runtime.
 | **AES-256-CTR encryption** | Bytecode payload encrypted with a fresh 32-byte key + 8-byte nonce per run |
 | **Base91 payload** | Encrypted blob encoded as a single compact Base91 string (`superflow_bytecode`) |
 | **SHA-256 integrity** | Runtime SHA-256 check on the encrypted blob (8 obfuscated word comparisons) |
-| **Anti-keylogger checks** | 4 runtime checks: debug hook, io library, string metatable, pcall integrity |
-| **Debug-hook detection** | Detects `debug.sethook` / `debug.getinfo` usage at runtime |
-| **Environment check** | Verifies critical globals (`tostring`, `type`, `string`, …) are intact |
+| **ProjectDiamond anti-tamper** | 14 runtime checks for Roblox/Luau object, signal, timing, and GUID integrity |
 | **Junk injection** | Dead-code statements sprinkled throughout the VM dispatch loop |
 | **ASCII cat watermark** | Obfuscated watermark string embedded in generated output |
 
@@ -100,7 +98,7 @@ local function <aes_xtime>(...) ... end
 local function <aes_key_expand>(...) ... end
 local function <aes_enc_block>(...) ... end
 local function <aes_ctr_decrypt>(...) ... end  -- AES-256-CTR
--- SHA-256 integrity check, anti-keylogger checks …
+-- SHA-256 integrity check, ProjectDiamond anti-tamper checks …
 -- deserializer, VM execute function …
 end
 ```
