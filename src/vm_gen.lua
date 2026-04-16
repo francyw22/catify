@@ -289,6 +289,12 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local bOr  = vn()   -- bitwise OR   (a | b)
     local bShl = vn()   -- left shift   (a << b)
     local bShr = vn()   -- right shift  (a >> b)
+    local b32Bx = vn()  -- obfuscated key: "bxor"
+    local b32Bn = vn()  -- obfuscated key: "bnot"
+    local b32Ba = vn()  -- obfuscated key: "band"
+    local b32Bo = vn()  -- obfuscated key: "bor"
+    local b32Ls = vn()  -- obfuscated key: "lshift"
+    local b32Rs = vn()  -- obfuscated key: "rshift"
     local vLoadCompat = vn() -- load/loadstring runtime loader
     local vPack = vn()       -- table.pack compat
     local vUnpack = vn()     -- table.unpack compat
@@ -318,6 +324,11 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     end
     local function _obfByte(n)
         return string.format("%s(%s,255)", bAnd, _obfInt(n))
+    end
+    local function _obfLitStr(s)
+        local parts = {}
+        for i = 1, #s do parts[i] = _obfByte(s:byte(i)) end
+        return string.format("string.char(%s)", table.concat(parts, ","))
     end
 
     -- ── 3. Compute SHA-256 of the encrypted blob for anti-tamper ─────────────
@@ -496,13 +507,15 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Bitwise compat: use bit32 library if available (Roblox Luau), otherwise
     -- compile native Lua 5.3 operators via loader so the Luau parser never sees ~, &, |, <<, >>
     LF("local %s,%s,%s,%s,%s,%s", bXor,bNot,bAnd,bOr,bShl,bShr)
-    LF("local bit32Available=type(bit32)=='table' and type(bit32.bxor)=='function' and type(bit32.bnot)=='function' and type(bit32.band)=='function' and type(bit32.bor)=='function'")
+    LF("local %s,%s,%s,%s,%s,%s=%s,%s,%s,%s,%s,%s", b32Bx,b32Bn,b32Ba,b32Bo,b32Ls,b32Rs,
+       _obfLitStr("bxor"),_obfLitStr("bnot"),_obfLitStr("band"),_obfLitStr("bor"),_obfLitStr("lshift"),_obfLitStr("rshift"))
+    LF("local bit32Available=type(bit32)=='table' and type(bit32[%s])=='function' and type(bit32[%s])=='function' and type(bit32[%s])=='function' and type(bit32[%s])=='function'", b32Bx,b32Bn,b32Ba,b32Bo)
     LF("if bit32Available then")
-    LF("  %s=bit32.bxor;%s=bit32.bnot;%s=bit32.band;%s=bit32.bor", bXor,bNot,bAnd,bOr)
+    LF("  %s=bit32[%s];%s=bit32[%s];%s=bit32[%s];%s=bit32[%s]", bXor,b32Bx,bNot,b32Bn,bAnd,b32Ba,bOr,b32Bo)
     -- bit32.lshift and bit32.rshift may be absent in some Roblox Luau builds.
     -- Fall back to a math-based equivalent using bit32.band (always present).
-    LF("  %s=bit32.lshift or function(a,b) if b>=32 then return 0 end;return bit32.band(a*(2^b),0xFFFFFFFF) end", bShl)
-    LF("  %s=bit32.rshift or function(a,b) if b>=32 then return 0 end;return math.floor(bit32.band(a,0xFFFFFFFF)/(2^b)) end", bShr)
+    LF("  %s=bit32[%s] or function(a,b) if b>=32 then return 0 end;return bit32[%s](a*(2^b),0xFFFFFFFF) end", bShl,b32Ls,b32Ba)
+    LF("  %s=bit32[%s] or function(a,b) if b>=32 then return 0 end;return math.floor(bit32[%s](a,0xFFFFFFFF)/(2^b)) end", bShr,b32Rs,b32Ba)
     LF("else")
     LF("  if type(%s)~='function' then error('Catify: missing bitwise support',0) end", vLoadCompat)
     LF("  local _f=%s('return function(a,b)return a~b end');if type(_f)~='function' then error('Catify: missing bitwise support',0) end;%s=_f()", vLoadCompat, bXor)
@@ -533,7 +546,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     src[#src+1] = junk_block("", math.random(2, 4))
     -- ── Emit payload concatenation helper (decoy wrapper using allocated names) ──
     -- ── Real inline Base91 decoder (decodes the payload back to the AES blob) ──
-    LF("local %s=%q", b91Alpha, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,./:;<=>?@[]^_`{|}~\"")
+    LF("local %s=%s", b91Alpha, _obfLitStr("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,./:;<=>?@[]^_`{|}~\""))
     LF("local %s={}", b91Tbl)
     LF("for _i=1,#%s do %s[%s:byte(_i)]=_i-1 end", b91Alpha, b91Tbl, b91Alpha)
     LF("local function %s(%s)", b91Dec, b91I)
@@ -1093,7 +1106,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     end
     -- Obfuscate the integrity-check error message so it doesn't appear as plaintext.
     do
-        local emsg = "Catify: integrity check failed"
+        local emsg = "[RUNTIME_ERROR] Catif: intg?ity ch4k failed"
         local emask = math.random(1, 255)
         local eparts = {}
         for i = 1, #emsg do eparts[i] = _obfByte(emsg:byte(i) ~ emask) end
