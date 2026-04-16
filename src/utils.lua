@@ -27,19 +27,20 @@ function Utils.rand_name(min_len, max_len)
 
     local alpha = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
     local alnum = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-    local len = math.random(min_len, max_len)
-    -- First character must be a letter (valid Lua identifier start)
-    local first_idx = math.random(1, #alpha)
-    local buf = { alpha:sub(first_idx, first_idx) }
-    for i = 2, len do
-        local idx = math.random(1, #alnum)
-        buf[#buf + 1] = alnum:sub(idx, idx)
+    while true do
+        local len = math.random(min_len, max_len)
+        -- First character must be a letter (valid Lua identifier start)
+        local first_idx = math.random(1, #alpha)
+        local buf = { alpha:sub(first_idx, first_idx) }
+        for i = 2, len do
+            local idx = math.random(1, #alnum)
+            buf[#buf + 1] = alnum:sub(idx, idx)
+        end
+        local name = table.concat(buf)
+        if not LUA_KEYWORDS[name] then
+            return name
+        end
     end
-    local name = table.concat(buf)
-    if LUA_KEYWORDS[name] then
-        return Utils.rand_name(min_len, max_len)
-    end
-    return name
 end
 
 --- Generate `count` unique random identifiers (no collisions)
