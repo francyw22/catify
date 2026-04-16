@@ -70,7 +70,9 @@ chat command.
 |---|---|
 | `!catify help` | Show usage |
 | `!catify print("hi")` | Obfuscate inline Lua code |
-| `!catify` + `.lua` file | Upload a file; bot returns the protected version |
+| `!catify` + `.lua`/`.txt` file | Upload a file; bot returns the protected version |
+
+The bot also performs a basic integrity check on generated output before sending it.
 
 ### Environment variables
 

@@ -16,7 +16,7 @@
     Commands (prefix configurable via CATIFY_PREFIX, default "!"):
       !catify  <code>       — Obfuscate inline Lua code (wrap in a ```lua block
                               or paste raw; the bot strips code-fence markdown).
-      !catify  (attachment) — Upload a .lua file; the bot obfuscates it and
+      !catify  (attachment) — Upload a .lua/.txt file; the bot obfuscates it and
                               returns the protected file as an attachment.
       !catify  help         — Show usage information.
 */
@@ -56,6 +56,7 @@ if (!TOKEN) {
 
 // Resolve the catify CLI entry point (one directory up from bot/)
 const CATIFY_CLI = path.resolve(__dirname, "..", "catify.lua");
+const ALLOWED_ATTACHMENT_EXTENSIONS = new Set([".lua", ".txt"]);
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -81,6 +82,13 @@ function stripCodeFence(text) {
 function truncate(s, max) {
     if (s.length <= max) return s;
     return s.slice(0, max - 3) + "...";
+}
+
+function hasValidProtectedOutput(content) {
+    if (typeof content !== "string" || content.length === 0) return false;
+    if (!content.startsWith("-- This file was protected by Catify v2.0.0")) return false;
+    if (!/superflow_bytecode\s*=/.test(content)) return false;
+    return true;
 }
 
 /**
@@ -143,7 +151,7 @@ Prefix: \`${PREFIX}\`
   • Wrap your code in a \`\`\`lua\`\`\` block for best formatting.
   • Example:  \`${PREFIX}catify print("hello")\`
 
-\`${PREFIX}catify\` *(with .lua attachment)*  — Obfuscate an uploaded \`.lua\` file.
+\`${PREFIX}catify\` *(with .lua/.txt attachment)*  — Obfuscate an uploaded \`.lua\` or \`.txt\` file.
   The bot replies with the protected file as a download.
 
 \`${PREFIX}catify help\`  — Show this message.
@@ -184,8 +192,9 @@ client.on("messageCreate", async (message) => {
     // ── File attachment mode ─────────────────────────────────────────────────
     const attachment = message.attachments.first();
     if (attachment) {
-        if (!attachment.name.endsWith(".lua")) {
-            await message.reply("❌ Attachment must be a `.lua` file.");
+        const attachmentExt = path.extname((attachment.name || "").toLowerCase());
+        if (!ALLOWED_ATTACHMENT_EXTENSIONS.has(attachmentExt)) {
+            await message.reply("❌ Attachment must be a `.lua` or `.txt` file.");
             return;
         }
         const size = attachment.size || 0;
@@ -216,11 +225,15 @@ client.on("messageCreate", async (message) => {
             );
             return;
         }
+        if (!hasValidProtectedOutput(result)) {
+            await message.reply("❌ Integrity check failed for protected output. Try again.");
+            return;
+        }
 
         const ratio = (result.length / Math.max(1, source.length)).toFixed(1);
         await message.reply({
             content: "Obfuscated successfully",
-            files: [new AttachmentBuilder(Buffer.from(result, "utf8"), { name: attachment.name })],
+            files: [new AttachmentBuilder(Buffer.from(result, "utf8"), { name: `${path.parse(attachment.name).name}_catified.lua` })],
         });
         return;
     }
@@ -236,7 +249,7 @@ client.on("messageCreate", async (message) => {
     if (source.length > MAX_INLINE) {
         await message.reply(
             `❌ Code too large for inline obfuscation (${source.length} bytes, max ${MAX_INLINE / 1024} KB). ` +
-            "Please upload a `.lua` file instead."
+            "Please upload a `.lua` or `.txt` file instead."
         );
         return;
     }
@@ -250,6 +263,10 @@ client.on("messageCreate", async (message) => {
         await message.reply(
             "❌ Obfuscation failed:\n```\n" + truncate(String(err.stderr || err.message), 1800) + "\n```"
         );
+        return;
+    }
+    if (!hasValidProtectedOutput(result)) {
+        await message.reply("❌ Integrity check failed for protected output. Try again.");
         return;
     }
 
