@@ -1163,31 +1163,43 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
            atSha, atShaExp, eraw, bXor, emask_expr)
     end
 
-    -- ── Anti-tamper block executor: XOR-decode + load() ─────────────────────
-    -- Each anti-tamper check is stored as XOR-encoded bytes; this helper
-    -- decodes them at runtime and executes them via load() so that none of
-    -- the check logic (error strings, API names) appears as readable text.
+    -- ── Anti-tamper block executor: rolling-XOR-decode + load() ─────────────
+    -- Each anti-tamper check is stored as multi-byte rolling-XOR-encoded bytes.
+    -- The executor receives the ciphertext (_e) and a key string (_k); it XORs
+    -- each byte with key[((i-1) % #key) + 1], then load()s the result.
+    -- Readable error strings are intentionally absent from this function body so
+    -- they do not appear as plaintext in the generated output.
     local at_exec_fmt =
-        "local function %s(_e,_m) local _concat=(table and table.concat) " ..
+        "local function %s(_e,_k) " ..
+        "local _concat=(table and table.concat) " ..
         "local _char=(string and string.char) " ..
-        "if type(_concat)~='function' then error('Catify: environment tampered (table.concat)',0) end " ..
-        "if type(_char)~='function' then error('Catify: environment tampered (string.char)',0) end " ..
-        "if type(%s)~='function' then error('Catify: anti-tamper loader missing',0) end " ..
-        "local _t={} for _i=1,#_e do _t[_i]=_char(%s(_e:byte(_i),_m)) end " ..
-        "local _f,_fe=%s(_concat(_t));if type(_f)~='function' then error('Catify: anti-tamper load failed '..tostring(_fe),0) end " ..
+        "if type(_concat)~='function' or type(_char)~='function' then error('e1',0) end " ..
+        "if type(%s)~='function' then error('e2',0) end " ..
+        "local _t={};local _n=#_k; " ..
+        "for _i=1,#_e do _t[_i]=_char(%s(_e:byte(_i),_k:byte((_i-1)%%_n+1))) end " ..
+        "local _f,_fe=%s(_concat(_t));if type(_f)~='function' then error(tostring(_fe),0) end " ..
         "local _ok,_er=pcall(_f);if not _ok then error(_er,0) end end"
     LF(at_exec_fmt, vAtExec, vLoadCompat, bXor, vLoadCompat)
 
-    -- Lua-level helper: XOR-encode `code_str` with a random byte mask and
-    -- emit a call to vAtExec(encoded_string, mask) into the generated source.
+    -- Lua-level helper: XOR-encode `code_str` with a random multi-byte rolling key
+    -- and emit a call to vAtExec(encoded_data, key_string) into the generated source.
+    -- Using a multi-byte key (4-12 bytes) makes brute-force recovery 256^klen times
+    -- harder than a single-byte mask, defeating trivial reverse-engineering.
     -- Bytes are split into chunks of at most 60 to stay within Lua's register limit.
     local AT_CHUNK = 60
     local function at_load(code_str)
-        local mask = math.random(1, 255)
+        local klen = math.random(4, 12)
+        local key = {}
+        for i = 1, klen do key[i] = math.random(1, 255) end
+
+        -- Encode the payload bytes with rolling key
         local all_parts = {}
         for i = 1, #code_str do
-            all_parts[i] = _obfByte(code_str:byte(i) ~ mask)
+            local ki = ((i - 1) % klen) + 1
+            all_parts[i] = _obfByte(code_str:byte(i) ~ key[ki])
         end
+
+        -- Split encoded payload into chunks of ≤ AT_CHUNK bytes each
         local chunks = {}
         for i = 1, #all_parts, AT_CHUNK do
             local chunk = {}
@@ -1196,7 +1208,13 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
             end
             chunks[#chunks + 1] = string.format("string.char(%s)", table.concat(chunk, ","))
         end
-        LF("%s(%s,%s)", vAtExec, table.concat(chunks, ".."), _obfInt(mask))
+
+        -- Emit the key as an obfuscated string.char(...) expression
+        local key_parts = {}
+        for i = 1, klen do key_parts[i] = _obfByte(key[i]) end
+        local key_expr = string.format("string.char(%s)", table.concat(key_parts, ","))
+
+        LF("%s(%s,%s)", vAtExec, table.concat(chunks, ".."), key_expr)
     end
 
     -- Anti-tamper 2: debug hook detection (self-contained, wrapped in pcall for Roblox)
