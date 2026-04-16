@@ -450,6 +450,9 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- in the generator). Only Luau/Roblox-safe ASCII characters are included.
     local _JUNK_POOL = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" ..
                        "!\"#$&'()*+,-./:;<=>?@[\\^_`{|}~"
+    local function _junk_quote(s)
+        return string.format("%q", s)
+    end
     local junk_forms = {
         -- form 1: x XOR x == 0
         function(indent)
@@ -593,7 +596,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
             end
             local garbage = table.concat(chars)
             local v1 = jpick()
-            return indent.."do local "..v1.."=[=["..garbage.."]=];if #"..v1.."<0 then "..v1.."=nil end end\n"
+            return indent.."do local "..v1.."=".._junk_quote(garbage)..";if #"..v1.."<0 then "..v1.."=nil end end\n"
         end,
         -- form 16: very large symbol-heavy garbage string (8000-20000 chars).
         -- Uses _JUNK_POOL (Luau-valid ASCII only); concatenation return avoids format-string injection.
@@ -606,7 +609,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
             end
             local garbage = table.concat(chars)
             local v1 = jpick()
-            return indent.."do local "..v1.."=[=["..garbage.."]=];if #"..v1.."<0 then "..v1.."=nil end end\n"
+            return indent.."do local "..v1.."=".._junk_quote(garbage)..";if #"..v1.."<0 then "..v1.."=nil end end\n"
         end,
         -- form 17: dead multi-string array — builds 50-150 symbol-heavy strings into a
         -- table array and concatenates them; dead branch discards the result.
@@ -621,7 +624,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
                     local pos = math.random(1, #_JUNK_POOL)
                     chars[j] = _JUNK_POOL:sub(pos, pos)
                 end
-                entries[i] = "[=["..table.concat(chars).."]=]"
+                entries[i] = _junk_quote(table.concat(chars))
             end
             local v1, v2 = jpick2()
             local tbl = table.concat(entries, ",")
@@ -640,7 +643,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
                     local pos = math.random(1, #_JUNK_POOL)
                     vchars[j] = _JUNK_POOL:sub(pos, pos)
                 end
-                entries[i] = "[=["..table.concat(vchars).."]=]"
+                entries[i] = _junk_quote(table.concat(vchars))
             end
             local v1, v2 = jpick2()
             local tbl = table.concat(entries, ",")
