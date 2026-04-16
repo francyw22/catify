@@ -125,6 +125,7 @@ end
 -- Base91 uses only safe printable ASCII characters, making the output resilient
 -- to any third-party tool that processes or re-encodes the generated Lua file.
 local PAYLOAD_VAR_NAME = "superflow_bytecode"
+local ANTI_TAMPER_CHECK_COUNT = 20
 local function emit_payload_b91(b91str)
     -- Declare as local inside the wrapper function so it doesn't pollute global scope.
     return "local " .. PAYLOAD_VAR_NAME .. "=" .. string.format("%q", b91str) .. ";"
@@ -272,9 +273,9 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local atChecks  = vn()
     local atPassed  = vn()
     local atChkVal  = vn()
-    local atEnumTbl = vn()
+    local atMaterialEnums = vn()
     local atCheckVars = {}
-    for i = 1, 20 do
+    for i = 1, ANTI_TAMPER_CHECK_COUNT do
         atCheckVars[i] = vn()
     end
     -- Watermark variable name
@@ -1192,8 +1193,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("        return game:GetService('HttpService'):GenerateGUID(false)")
     LF("    end)")
     LF("    local %s = %s and #%s == 36 and %s:sub(9,9) == '-'", atCheckVars[14], atGuidOk, atGuid, atGuid)
-    LF("    local %s = Enum.Material:GetEnumItems()", atEnumTbl)
-    LF("    local %s = typeof(%s) == 'table' and #%s > 0", atCheckVars[15], atEnumTbl, atEnumTbl)
+    LF("    local %s = Enum.Material:GetEnumItems()", atMaterialEnums)
+    LF("    local %s = typeof(%s) == 'table' and #%s > 0", atCheckVars[15], atMaterialEnums, atMaterialEnums)
     LF("    local %s = typeof(task.spawn) == 'function' and typeof(task.delay) == 'function'", atCheckVars[16])
     LF("    local %s = typeof(game.GetService) == 'function' and typeof(game.FindFirstChild) == 'function'", atCheckVars[17])
     LF("    local %s = game:GetService('Players')", atPlayers)
