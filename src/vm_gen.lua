@@ -996,7 +996,22 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
 
     -- Early anti-envlogger guard: run before key/nonce assembly so wrapped
     -- builtins cannot observe useful decrypted/materialized data.
-    LF(string.format("do local _ce=%s;local _d=(type(_ce)=='table' and rawget(_ce,'debug')) or nil;local _gi=(type(_d)=='table' and rawget(_d,'getinfo')) or nil;local _sd=(type(string)=='table' and rawget(string,'dump')) or nil;local _loader=(type(load)=='function' and load) or (type(loadstring)=='function' and loadstring) or nil;local _f1=(type(string)=='table' and rawget(string,'char')) or nil;local _f2=(type(table)=='table' and rawget(table,'concat')) or nil;local _f3=_loader;local _f4=pcall;local _f5=tostring;if type(_f1)~='function' or type(_f2)~='function' or type(_f3)~='function' or type(_f4)~='function' or type(_f5)~='function' then error('Catify: environment tampered (early core)',0) end;local function _vf(_f,_tag) if type(_sd)=='function' then local _ok=pcall(_sd,_f);if _ok then error('Catify: env logger detected ('.._tag..':dump)',0) end end;if type(_gi)=='function' then local _ok,_inf=pcall(_gi,_f,'S');if _ok and type(_inf)=='table' then local _w=rawget(_inf,'what');local _s=rawget(_inf,'source');if (_w~=nil and _w~='C') or (type(_s)=='string' and _s~='[C]') then error('Catify: env logger detected ('.._tag..':wrapped)',0) end end end end;_vf(_f1,'string.char');_vf(_f2,'table.concat');_vf(_f3,'loader');_vf(_f4,'pcall');_vf(_f5,'tostring') end", env_expr))
+    local early_env_guard =
+        "do local _ce=%s;local _d=(type(_ce)=='table' and rawget(_ce,'debug')) or nil;" ..
+        "local _gi=(type(_d)=='table' and rawget(_d,'getinfo')) or nil;" ..
+        "local _sd=(type(string)=='table' and rawget(string,'dump')) or nil;" ..
+        "local _loader=(type(load)=='function' and load) or (type(loadstring)=='function' and loadstring) or nil;" ..
+        "local _f1=(type(string)=='table' and rawget(string,'char')) or nil;" ..
+        "local _f2=(type(table)=='table' and rawget(table,'concat')) or nil;" ..
+        "local _f3=_loader;local _f4=pcall;local _f5=tostring;" ..
+        "local function _must(_f,_tag) if type(_f)~='function' then error('Catify: environment tampered (early '.._tag..')',0) end end;" ..
+        "_must(_f1,'string.char');_must(_f2,'table.concat');_must(_f3,'loader');_must(_f4,'pcall');_must(_f5,'tostring');" ..
+        "local function _vf(_f,_tag) " ..
+          "if type(_sd)=='function' then local _ok,_dumped=pcall(_sd,_f);if _ok and type(_dumped)=='string' and #_dumped>0 then error('Catify: env logger detected ('.._tag..':dump)',0) end end;" ..
+          "if type(_gi)=='function' then local _ok,_inf=pcall(_gi,_f,'S');if _ok and type(_inf)=='table' then local _w=rawget(_inf,'what');local _s=rawget(_inf,'source');if (_w~=nil and _w~='C') or (type(_s)=='string' and _s~='[C]') then error('Catify: env logger detected ('.._tag..':wrapped)',0) end end end " ..
+        "end;" ..
+        "_vf(_f1,'string.char');_vf(_f2,'table.concat');_vf(_f3,'loader');_vf(_f4,'pcall');_vf(_f5,'tostring') end"
+    LF(string.format(early_env_guard, env_expr))
 
     -- AES key split into 4 × 8-byte chunks with per-chunk runtime XOR masks.
     -- Each chunk's bytes are pre-XOR'd with a session mask at codegen time so
