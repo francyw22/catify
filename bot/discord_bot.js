@@ -48,6 +48,7 @@ const PREFIX       = process.env.CATIFY_PREFIX || "!";
 const PASSES       = Math.max(1, Math.min(2, parseInt(process.env.CATIFY_PASSES  || "1", 10)));
 const MAX_INLINE   = parseInt(process.env.CATIFY_MAX_INLINE || String(32  * 1024), 10);
 const MAX_FILE     = parseInt(process.env.CATIFY_MAX_FILE   || String(512 * 1024), 10);
+const MIN_PROTECTED_OUTPUT_LENGTH = 200;
 
 if (!TOKEN) {
     console.error("Error: CATIFY_TOKEN is not set. Create bot/.env from .env.example.");
@@ -86,8 +87,8 @@ function truncate(s, max) {
 
 function hasValidProtectedOutput(content) {
     if (typeof content !== "string" || content.length === 0) return false;
-    if (content.length < 200) return false;
-    if (!/^-- This file was protected by Catify v\d+\.\d+\.\d+/.test(content)) return false;
+    if (content.length < MIN_PROTECTED_OUTPUT_LENGTH) return false;
+    if (!/^-- This file was protected by Catify v[^\n]+/.test(content)) return false;
     const markers = [
         /\bsuperflow_bytecode\s*=/,
         /\bsetmetatable\(\{\[0\]=/,
