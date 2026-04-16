@@ -678,4 +678,107 @@ function Utils.base91_dec(data)
     return table.concat(out)
 end
 
+-- ─── ChaCha20 stream cipher ───────────────────────────────────────────────────
+-- Pure-Lua ChaCha20 (RFC 7539 / matching the decoded VM's _chacha20_decrypt).
+-- key   : 32-byte string
+-- nonce : 8-byte string  (used as words [2..3] of the 12-byte nonce; counter=word[1])
+-- data  : plaintext or ciphertext (XOR is symmetric)
+-- Returns encrypted/decrypted string.
+function Utils.chacha20(data, key, nonce)
+    assert(#key == 32,  "ChaCha20 key must be 32 bytes")
+    assert(#nonce == 8, "ChaCha20 nonce must be 8 bytes")
+
+    local function rol32(v, n)
+        v = v & 0xFFFFFFFF
+        return ((v << n) | (v >> (32 - n))) & 0xFFFFFFFF
+    end
+    local function add32(a, b) return (a + b) & 0xFFFFFFFF end
+    local function u32le(s, i)
+        return ( s:byte(i)
+               | (s:byte(i+1) << 8)
+               | (s:byte(i+2) << 16)
+               | (s:byte(i+3) << 24) ) & 0xFFFFFFFF
+    end
+
+    -- ChaCha20 "expand 32-byte k" constants
+    local C0 = 0x61707865; local C1 = 0x3320646e
+    local C2 = 0x79622d32; local C3 = 0x6b206574
+
+    -- Key words
+    local k = {}
+    for i = 0, 7 do k[i+1] = u32le(key, i*4+1) end
+
+    -- Nonce words (word 0 = counter, words 1-2 = 8-byte nonce, word 3 = 0)
+    local n1 = u32le(nonce, 1)
+    local n2 = u32le(nonce, 5)
+
+    local out    = {}
+    local datlen = #data
+    local pos    = 0
+    local ctr    = 0
+
+    while pos < datlen do
+        -- Initial state (16 words)
+        local s = { C0,C1,C2,C3,
+                    k[1],k[2],k[3],k[4], k[5],k[6],k[7],k[8],
+                    ctr, n1, n2, 0 }
+        local w = { table.unpack(s) }
+
+        local function qr(ai, bi, ci, di)
+            w[ai]=add32(w[ai],w[bi]); w[di]=rol32(w[di]~w[ai],16)
+            w[ci]=add32(w[ci],w[di]); w[bi]=rol32(w[bi]~w[ci],12)
+            w[ai]=add32(w[ai],w[bi]); w[di]=rol32(w[di]~w[ai],8)
+            w[ci]=add32(w[ci],w[di]); w[bi]=rol32(w[bi]~w[ci],7)
+        end
+
+        for _ = 1, 10 do   -- 20 rounds = 10 double-rounds
+            qr(1,5,9,13); qr(2,6,10,14); qr(3,7,11,15); qr(4,8,12,16)
+            qr(1,6,11,16); qr(2,7,12,13); qr(3,8,9,14); qr(4,5,10,15)
+        end
+
+        for i = 1, 16 do w[i] = add32(w[i], s[i]) end
+
+        -- XOR keystream with data (up to 64 bytes per block)
+        local block_len = math.min(64, datlen - pos)
+        for j = 0, block_len - 1 do
+            local widx   = j // 4 + 1
+            local shift  = (j % 4) * 8
+            local kbyte  = (w[widx] >> shift) & 0xFF
+            out[#out+1]  = string.char(data:byte(pos + j + 1) ~ kbyte)
+        end
+
+        pos = pos + 64
+        ctr = ctr + 1
+    end
+
+    return table.concat(out)
+end
+
+-- ─── Base85 (Ascii85) encoder ─────────────────────────────────────────────────
+-- Compatible with the decoder in the decoded VM (obfuscated_sab.lua):
+--   5 chars per 4 bytes, range '!'..'u' (33-117), LE word order,
+--   'z' shorthand for 4 zero bytes (only used when data length is multiple of 4).
+-- Pads to a multiple of 4 with NUL bytes; trailing NULs are harmless in Lua source.
+function Utils.base85_enc(data)
+    local out = {}
+    local pad  = (4 - #data % 4) % 4
+    local s    = data .. string.rep('\0', pad)
+    for i = 1, #s, 4 do
+        local b1,b2,b3,b4 = s:byte(i, i+3)
+        local v = b1 + b2*256 + b3*65536 + b4*16777216  -- LE → u32
+        if v == 0 and pad == 0 then
+            out[#out+1] = 'z'
+        else
+            -- Decompose into 5 base-85 digits (big-endian digit order)
+            local e = v % 85;          v = math.floor(v / 85)
+            local d = v % 85;          v = math.floor(v / 85)
+            local c = v % 85;          v = math.floor(v / 85)
+            local b = v % 85;          v = math.floor(v / 85)
+            local a = v % 85
+            out[#out+1] = string.char(a+33, b+33, c+33, d+33, e+33)
+        end
+    end
+    return table.concat(out)
+end
+
 return Utils

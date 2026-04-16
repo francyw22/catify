@@ -223,7 +223,7 @@ local function main(argv)
     local output_size   = #result_code
     info("Done!  %d → %d bytes  (%.1fx)",
          original_size, output_size, output_size / math.max(1, original_size))
-    info("Protected with: opcode shuffle, AES-256-CTR encryption, SHA-256 integrity, debug strip, junk injection (intensity %d), VM dispatch obfuscation, stealth anti-tamper (20 checks)", opts.intensity)
+    info("Protected with: opcode shuffle, ChaCha20 encryption, Base85 encoding, SHA-256 integrity, debug strip, junk injection (intensity %d), VM dispatch obfuscation, hookfunction/getgenv/debug.info anti-tamper", opts.intensity)
 end
 
 main(arg)
