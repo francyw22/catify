@@ -152,10 +152,10 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local b91_blob = utils.base91_enc(blob)   -- Base91-encode for safe single-string payload
 
     -- ── 2. Generate random identifiers for all locals ───────────────────────
-    -- We need ~80 unique names for VM internals
-    -- Initial pre-allocation for the common path; vn() extends this pool as needed.
+    -- We need ~80 unique names for VM internals.
+    -- Pre-allocate with buffer for per-check anti-tamper locals; vn() can still extend.
     local INITIAL_NAME_POOL_SIZE = 220
-    local EXTRA_NAME_MAX_ATTEMPTS = 1000
+    local EXTRA_NAME_MAX_ATTEMPTS = INITIAL_NAME_POOL_SIZE * 5
     local N  = utils.rand_names(INITIAL_NAME_POOL_SIZE)
     local used_names = {}
     for i = 1, #N do used_names[N[i]] = true end
@@ -170,7 +170,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
                 extra = utils.rand_name()
             until (not used_names[extra]) or attempts >= EXTRA_NAME_MAX_ATTEMPTS
             if used_names[extra] then
-                error("VmGen: failed to allocate a unique identifier")
+                error("VmGen: failed to allocate a unique identifier after "
+                    .. attempts .. " attempts (pool size: " .. #N .. ")")
             end
             used_names[extra] = true
             N[#N + 1] = extra
