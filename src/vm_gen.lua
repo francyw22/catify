@@ -434,27 +434,220 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         return _JN[i], _JN[j], _JN[k2]
     end
 
-    -- Single junk form: dead assignment with a random string in the style of "7fn.zIS1u@xj"
-    -- (short alphanumeric + symbol mix, valid for Luau string literals).
-    -- Pool: alphanumerics plus symbols that appear in the reference style and are safe
-    -- inside Luau double-quoted strings (no backslash, no double-quote, no newline).
+    -- Ten forms of always-dead opaque predicates / no-op computations:
+    --  form 1: x XOR x == 0, never > 0
+    --  form 2: n // n == 1, never < 1
+    --  form 3: (a+b)*c - (a+b)*c == 0, never > 1
+    --  form 4: #"literal" == known length, dead if branch
+    --  form 5: table constructor immediately discarded, length always 0
+    --  form 6: multi-step XOR chain that cancels to 0
+    --  form 7: math.max(a, b) identity (a >= b, so result == a, dead sub-branch)
+    --  form 8: string.rep + #  identity
+    --  form 9: fake config table with dead branch (looks like real init code)
+    --  form 10: fake string sanitize (dead upper/lower branch)
+    -- Shared pool for forms 15-18: all printable ASCII valid in Luau long strings,
+    -- excluding ']' (would close [=[...]=]) and '%' (would corrupt string.format calls
+    -- in the generator). Only Luau/Roblox-safe ASCII characters are included.
     local _JUNK_POOL = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" ..
-                       ".-_@#!+*=?/^~|<>(){}:;"
+                       "!\"#$&'()*+,-./:;<=>?@[\\^_`{|}~"
     local function _junk_quote(s)
         return string.format("%q", s)
     end
     local junk_forms = {
-        -- form 1: random symbol-style string dead-code assignment
+        -- form 1: x XOR x == 0
+        function(indent)
+            local v1, v2 = jpick2()
+            local a = math.random(1, 0x7FFF)
+            local b = math.random(1, 0xFF)
+            return string.format(
+                "%sdo local %s=%d*%d;local %s=%s(%s,%s);if %s>0 then %s=%s+%d end end\n",
+                indent, v1, a, b, v2, bXor, v1, v1, v2, v1, v1, math.random(1, 0xFF))
+        end,
+        -- form 2: integer division identity
+        function(indent)
+            local v1, v2 = jpick2()
+            local a = math.random(2, 0x3FFF)
+            local c = math.random(1, 9)
+            return string.format(
+                "%sdo local %s=%d+%d;local %s=%s//%s;if %s<%d then %s=%s*%d end end\n",
+                indent, v1, a, c, v2, v1, v1, v2, 1, v1, v1, math.random(2, 9))
+        end,
+        -- form 3: product minus itself
+        function(indent)
+            local v1, v2 = jpick2()
+            local a = math.random(1, 0x1FFF)
+            local b = math.random(1, 0x1FFF)
+            local c = math.random(1, 7)
+            local prod = (a + b) * c
+            return string.format(
+                "%sdo local %s=(%d+%d)*%d;local %s=%s-%d;if %s>1 then %s=%s^2 end end\n",
+                indent, v1, a, b, c, v2, v1, prod, v2, v1, v1)
+        end,
+        -- form 4: string length identity (dead branch on impossible length)
         function(indent)
             local v1 = jpick()
-            local len = math.random(8, 24)
+            local words = {"cache","token","handle","driver","plugin","loader"}
+            local w = words[math.random(1, #words)]
+            local wrong_len = #w + math.random(1, 5)
+            return string.format(
+                "%sdo local %s=#%q;if %s==%d then %s=%s*0 end end\n",
+                indent, v1, w, v1, wrong_len, v1, v1)
+        end,
+        -- form 5: empty table, length check always 0
+        function(indent)
+            local v1, v2 = jpick2()
+            local n = math.random(1, 9)
+            return string.format(
+                "%sdo local %s={};for %s=1,%d do end;if #%s>0 then %s[1]=nil end end\n",
+                indent, v1, v2, n, v1, v1)
+        end,
+        -- form 6: multi-step XOR chain cancelling to 0
+        function(indent)
+            local v1, v2, v3 = jpick3()
+            local x = math.random(1, 0xFFFF)
+            local y = math.random(1, 0xFFFF)
+            local z = x ~ y
+            return string.format(
+                "%sdo local %s=%d;local %s=%d;local %s=%s(%s,%s);if %s(%s,%s)>0 then %s=%s(%s,1) end end\n",
+                indent, v1, x, v2, y, v3, bXor, v1, v2, bXor, v3, v1, v2, bOr, v2)
+        end,
+        -- form 7: math.max identity (always picks first arg)
+        function(indent)
+            local v1 = jpick()
+            local big = math.random(0x1000, 0x7FFF)
+            local small = math.random(1, big - 1)
+            return string.format(
+                "%sdo local %s=math.max(%d,%d);if %s<%d then %s=%s+1 end end\n",
+                indent, v1, big, small, v1, big, v1, v1)
+        end,
+        -- form 8: string.rep + #  identity
+        function(indent)
+            local v1 = jpick()
+            local ch = string.char(math.random(97, 122))   -- a-z
+            local n  = math.random(3, 8)
+            return string.format(
+                "%sdo local %s=string.rep(%q,%d);if #%s~=%d then %s=nil end end\n",
+                indent, v1, ch, n, v1, n, v1)
+        end,
+        -- form 9: fake config table with dead branch (looks like real init code)
+        function(indent)
+            local v1 = jpick()
+            local cfg_keys = {"timeout","retries","verbose","mode","level","limit"}
+            local k = cfg_keys[math.random(1, #cfg_keys)]
+            local v = math.random(0, 1) == 1 and "true" or tostring(math.random(1,9))
+            return string.format(
+                "%sdo local %s={%s=%s};if %s.%s==nil then %s.%s=%s end end\n",
+                indent, v1, k, v, v1, k, v1, k, v)
+        end,
+        -- form 10: fake string sanitize (dead upper/lower branch)
+        function(indent)
+            local v1, v2 = jpick2()
+            local words = {"data","value","result","output","buffer","token"}
+            local w = words[math.random(1, #words)]
+            return string.format(
+                "%sdo local %s=%q;local %s=string.upper(%s);if #%s<0 then %s=%s end end\n",
+                indent, v1, w, v2, v1, v2, v1, v2)
+        end,
+        -- form 11: integer division identity (no bXor) – b * (a // b) == a when divisible
+        function(indent)
+            local v1, v2 = jpick2()
+            local b = math.random(2, 9)
+            local q = math.random(1, 100)
+            local a = q * b  -- a is always divisible by b, so a // b == q
+            return string.format(
+                "%sdo local %s=%d;local %s=%s//%d;if %s~=%d then %s=%s*0 end end\n",
+                indent, v1, a, v2, v1, b, v2, q, v1, v1)
+        end,
+        -- form 12: string.byte + string.char round-trip identity (no bXor)
+        function(indent)
+            local v1, v2 = jpick2()
+            local bval = math.random(65, 90)  -- ASCII A-Z
+            return string.format(
+                "%sdo local %s=string.char(%d);local %s=string.byte(%s);if %s~=%d then %s=nil end end\n",
+                indent, v1, bval, v2, v1, v2, bval, v1)
+        end,
+        -- form 13: math.floor identity – floor of an integer is itself (no bXor)
+        function(indent)
+            local v1 = jpick()
+            local n = math.random(5, 9999)
+            return string.format(
+                "%sdo local %s=%d;if math.floor(%s)~=%s then %s=%s+1 end end\n",
+                indent, v1, n, v1, v1, v1, v1)
+        end,
+        -- form 14: tostring + # length identity (no bXor)
+        function(indent)
+            local v1, v2 = jpick2()
+            local n = math.random(10, 9999)
+            local slen = #tostring(n)
+            return string.format(
+                "%sdo local %s=%d;local %s=#tostring(%s);if %s~=%d then %s=%s*0 end end\n",
+                indent, v1, n, v2, v1, v2, slen, v1, v1)
+        end,
+        -- form 15: random garbage-string dead-code assignment (looks like obfuscated data/token)
+        -- Generates a fresh random string of 300-1500 printable ASCII chars (mix of alphanumeric
+        -- and Luau-valid symbols) each time; dead branch guarantees it never executes.
+        -- Uses _JUNK_POOL (no ']' or '%'); string concatenation avoids format-string injection.
+        function(indent)
+            local len = math.random(300, 1500)
             local chars = {}
             for i = 1, len do
                 local pos = math.random(1, #_JUNK_POOL)
                 chars[i] = _JUNK_POOL:sub(pos, pos)
             end
-            local s = table.concat(chars)
-            return indent.."do local "..v1.."=".._junk_quote(s)..";if #"..v1.."<0 then "..v1.."=nil end end\n"
+            local garbage = table.concat(chars)
+            local v1 = jpick()
+            return indent.."do local "..v1.."=".._junk_quote(garbage)..";if #"..v1.."<0 then "..v1.."=nil end end\n"
+        end,
+        -- form 16: very large symbol-heavy garbage string (8000-20000 chars).
+        -- Uses _JUNK_POOL (Luau-valid ASCII only); concatenation return avoids format-string injection.
+        function(indent)
+            local len = math.random(8000, 20000)
+            local chars = {}
+            for i = 1, len do
+                local pos = math.random(1, #_JUNK_POOL)
+                chars[i] = _JUNK_POOL:sub(pos, pos)
+            end
+            local garbage = table.concat(chars)
+            local v1 = jpick()
+            return indent.."do local "..v1.."=".._junk_quote(garbage)..";if #"..v1.."<0 then "..v1.."=nil end end\n"
+        end,
+        -- form 17: dead multi-string array — builds 50-150 symbol-heavy strings into a
+        -- table array and concatenates them; dead branch discards the result.
+        -- Each entry is 30-150 Luau-valid ASCII chars; total output 1500-22500 chars.
+        function(indent)
+            local count = math.random(50, 150)
+            local entries = {}
+            for i = 1, count do
+                local slen = math.random(30, 150)
+                local chars = {}
+                for j = 1, slen do
+                    local pos = math.random(1, #_JUNK_POOL)
+                    chars[j] = _JUNK_POOL:sub(pos, pos)
+                end
+                entries[i] = _junk_quote(table.concat(chars))
+            end
+            local v1, v2 = jpick2()
+            local tbl = table.concat(entries, ",")
+            return indent.."do local "..v1.."={"..tbl.."};local "..v2.."=table.concat("..v1..");if #"..v2.."<0 then "..v2.."=nil end end\n"
+        end,
+        -- form 18: dead symbol-string array — 20-60 Luau-valid ASCII symbol strings stored
+        -- in a table, length-checked, then discarded via always-false branch. Each string
+        -- 20-80 chars. Concatenation-built return; no string.format injection risk.
+        function(indent)
+            local count = math.random(20, 60)
+            local entries = {}
+            for i = 1, count do
+                local vlen = math.random(20, 80)
+                local vchars = {}
+                for j = 1, vlen do
+                    local pos = math.random(1, #_JUNK_POOL)
+                    vchars[j] = _JUNK_POOL:sub(pos, pos)
+                end
+                entries[i] = _junk_quote(table.concat(vchars))
+            end
+            local v1, v2 = jpick2()
+            local tbl = table.concat(entries, ",")
+            return indent.."do local "..v1.."={"..tbl.."};local "..v2.."=#"..v1..";if "..v2.."<0 then "..v1.."=nil end end\n"
         end,
     }
     local function junk_stmt(indent)
