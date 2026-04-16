@@ -573,6 +573,25 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
                 "%sdo local %s=%d;local %s=#tostring(%s);if %s~=%d then %s=%s*0 end end\n",
                 indent, v1, n, v2, v1, v2, slen, v1, v1)
         end,
+        -- form 15: random garbage-string dead-code assignment (looks like obfuscated data/token)
+        -- Generates a fresh random string of 80-200 printable chars (style: mix of
+        -- alphanumeric and symbols) each time; dead branch guarantees it never executes.
+        -- ']' is excluded from the pool so the value is always safe inside [=[...]=].
+        function(indent)
+            local _pool = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" ..
+                          "!+#;)/_%<>=^~&.${@|,?*(:}`\""
+            local len = math.random(80, 200)
+            local chars = {}
+            for i = 1, len do
+                local pos = math.random(1, #_pool)
+                chars[i] = _pool:sub(pos, pos)
+            end
+            local garbage = table.concat(chars)
+            local v1 = jpick()
+            return string.format(
+                "%sdo local %s=[=[%s]=];if #%s<0 then %s=nil end end\n",
+                indent, v1, garbage, v1, v1)
+        end,
     }
     local function junk_stmt(indent)
         return junk_forms[math.random(1, #junk_forms)](indent)
