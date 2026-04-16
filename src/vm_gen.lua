@@ -338,8 +338,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         local parts = {}
         for i = 1, #s do
             local b = s:byte(i)
-            local h = (b >> 4) & 0xF   -- high nibble (generator-side, Lua 5.3)
-            local lo = b & 0xF          -- low  nibble
+            local h = math.floor(b / 16)   -- high nibble, portable across Lua versions
+            local lo = b % 16               -- low  nibble
             parts[i] = string.format("(%d*16+%d)", h, lo)
         end
         return string.format("string.char(%s)", table.concat(parts, ","))
