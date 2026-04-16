@@ -86,8 +86,16 @@ function truncate(s, max) {
 
 function hasValidProtectedOutput(content) {
     if (typeof content !== "string" || content.length === 0) return false;
+    if (content.length < 200) return false;
     if (!/^-- This file was protected by Catify v\d+\.\d+\.\d+/.test(content)) return false;
-    if (!/\bsuperflow_bytecode\s*=/.test(content)) return false;
+    const markers = [
+        /\bsuperflow_bytecode\s*=/,
+        /\bsetmetatable\(\{\[0\]=/,
+        /\blocal\s+function\s+\w+\(/,
+    ];
+    for (const marker of markers) {
+        if (!marker.test(content)) return false;
+    }
     return true;
 }
 
