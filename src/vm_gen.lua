@@ -1376,14 +1376,14 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         if trimmed then
             trimmed = trimmed:match("^(.-)%s*$")
         end
-        local is_line_comment = (trimmed == "--") or (trimmed and trimmed:match("^%-%-[^%[]"))
+        local is_line_comment = trimmed and trimmed:match("^%-%-") and not trimmed:match("^%-%-%[")
         if trimmed and trimmed ~= "" and not is_line_comment then
             compact_lines[#compact_lines + 1] = trimmed
         end
     end
     -- Keep header without introducing a newline that would create a second line.
     local header = "--[[ This file was protected by Catify v2.0.0 ]] "
-    return header .. table.concat(compact_lines, " ")
+    return header .. table.concat(compact_lines, ";")
 end
 
 return VmGen
