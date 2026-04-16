@@ -86,9 +86,15 @@ function truncate(s, max) {
 
 function hasValidProtectedOutput(content) {
     if (typeof content !== "string" || content.length === 0) return false;
-    if (!content.startsWith("-- This file was protected by Catify v2.0.0")) return false;
-    if (!/superflow_bytecode\s*=/.test(content)) return false;
+    if (!/^-- This file was protected by Catify v\d+\.\d+\.\d+/.test(content)) return false;
+    if (!/\bsuperflow_bytecode\s*=/.test(content)) return false;
     return true;
+}
+
+function buildOutputAttachmentName(inputName) {
+    const parsed = path.parse(inputName || "catified.lua");
+    const ext = parsed.ext || ".lua";
+    return `${parsed.name}_catified${ext}`;
 }
 
 /**
@@ -233,7 +239,7 @@ client.on("messageCreate", async (message) => {
         const ratio = (result.length / Math.max(1, source.length)).toFixed(1);
         await message.reply({
             content: "Obfuscated successfully",
-            files: [new AttachmentBuilder(Buffer.from(result, "utf8"), { name: `${path.parse(attachment.name).name}_catified.lua` })],
+            files: [new AttachmentBuilder(Buffer.from(result, "utf8"), { name: buildOutputAttachmentName(attachment.name) })],
         });
         return;
     }
