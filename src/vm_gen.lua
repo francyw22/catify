@@ -163,7 +163,6 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
 
     -- Core names
     local vExec     = vn()   -- main execute function
-    local vDeser    = vn()   -- deserializer function
     local vDecrypt  = vn()   -- RC4 decrypt function
     local vKey      = vn()   -- RC4 key string
     local vBlob     = vn()   -- encrypted bytecode blob
@@ -219,22 +218,18 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local eBx       = vn()
     local eSBx      = vn()
     local eRk       = vn()
-    local eRet      = vn()
     local eCallArgs = vn()
     local eNargs    = vn()
     local eResults  = vn()
     local eFn       = vn()
-    local eOffset   = vn()
     local eNelem    = vn()
     local eSuvs     = vn()
     local eUv       = vn()
     local eSub      = vn()
-    local eState    = vn()   -- dispatch state for CF obfuscation
     local eIdx      = vn()
     local eLim      = vn()
     local eStep     = vn()
     local eI        = vn()
-    local eT        = vn()
     -- anti-tamper names (atPayload is now the fixed string "superflow_bytecode")
     local vStrXor   = vn()   -- string-constant XOR key (second encryption layer)
     -- SHA-256 integrity check variable names
@@ -276,15 +271,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local wmI = vn()
     local wmV = vn()
     local keyTbl = vn()
-    local keyMask1 = vn()
-    local keyMask2 = vn()
-    local keyMask3 = vn()
-    local keyMask4 = vn()
-    local keyIdx = vn()
     local nonceTbl = vn()
-    local nonceMask1 = vn()
-    local nonceMask2 = vn()
-    local nonceIdx = vn()
     -- Bootstrap helper aliases
     local bsToStr   = vn()
     local bsType    = vn()
@@ -311,18 +298,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local vDk2 = vn()   -- decoy key fragment 2 (never used for real decryption)
     -- Bitwise compat helpers: use bit32 (Roblox Luau) or native ops loaded via load()
     -- (native ops in load() strings bypass Luau's parser so older Luau versions work too)
-    local bXor = vn()   -- bitwise XOR  (a ~ b)
-    local bNot = vn()   -- bitwise NOT  (~a)
-    local bAnd = vn()   -- bitwise AND  (a & b)
-    local bOr  = vn()   -- bitwise OR   (a | b)
-    local bShl = vn()   -- left shift   (a << b)
-    local bShr = vn()   -- right shift  (a >> b)
-    local b32Bx = vn()  -- obfuscated key: "bxor"
-    local b32Bn = vn()  -- obfuscated key: "bnot"
-    local b32Ba = vn()  -- obfuscated key: "band"
-    local b32Bo = vn()  -- obfuscated key: "bor"
-    local b32Ls = vn()  -- obfuscated key: "lshift"
-    local b32Rs = vn()  -- obfuscated key: "rshift"
+    local bXor, bNot, bAnd, bOr, bShl, bShr = "x", "n", "a", "o", "l", "r"
     local vLoadCompat = vn() -- load/loadstring runtime loader
     local vPack = vn()       -- table.pack compat
     local vUnpack = vn()     -- table.unpack compat
@@ -545,15 +521,15 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Bitwise compat: use bit32 library if available (Roblox Luau), otherwise
     -- compile native Lua 5.3 operators via loader so the Luau parser never sees ~, &, |, <<, >>
     LF("local %s,%s,%s,%s,%s,%s", bXor,bNot,bAnd,bOr,bShl,bShr)
-    LF("local %s,%s,%s,%s,%s,%s=%s,%s,%s,%s,%s,%s", b32Bx,b32Bn,b32Ba,b32Bo,b32Ls,b32Rs,
+    LF("local b,c,d,e,f,g=%s,%s,%s,%s,%s,%s",
        _earlyLitStr("bxor"),_earlyLitStr("bnot"),_earlyLitStr("band"),_earlyLitStr("bor"),_earlyLitStr("lshift"),_earlyLitStr("rshift"))
-    LF("local bit32Available=type(bit32)=='table' and type(bit32[%s])=='function' and type(bit32[%s])=='function' and type(bit32[%s])=='function' and type(bit32[%s])=='function'", b32Bx,b32Bn,b32Ba,b32Bo)
+    LF("local bit32Available=type(bit32)=='table' and type(bit32[b])=='function' and type(bit32[c])=='function' and type(bit32[d])=='function' and type(bit32[e])=='function'")
     LF("if bit32Available then")
-    LF("  %s=bit32[%s];%s=bit32[%s];%s=bit32[%s];%s=bit32[%s]", bXor,b32Bx,bNot,b32Bn,bAnd,b32Ba,bOr,b32Bo)
+    LF("  %s=bit32[b];%s=bit32[c];%s=bit32[d];%s=bit32[e]", bXor,bNot,bAnd,bOr)
     -- bit32.lshift and bit32.rshift may be absent in some Roblox Luau builds.
     -- Fall back to a math-based equivalent using bit32.band (always present).
-    LF("  %s=bit32[%s] or function(a,b) if b>=32 then return 0 end;return bit32[%s](a*(2^b),0xFFFFFFFF) end", bShl,b32Ls,b32Ba)
-    LF("  %s=bit32[%s] or function(a,b) if b>=32 then return 0 end;return math.floor(bit32[%s](a,0xFFFFFFFF)/(2^b)) end", bShr,b32Rs,b32Ba)
+    LF("  %s=bit32[f] or function(a,b) if b>=32 then return 0 end;return bit32[d](a*(2^b),0xFFFFFFFF) end", bShl)
+    LF("  %s=bit32[g] or function(a,b) if b>=32 then return 0 end;return math.floor(bit32[d](a,0xFFFFFFFF)/(2^b)) end", bShr)
     LF("else")
     LF("  if type(%s)~='function' then error('Catify: missing bitwise support',0) end", vLoadCompat)
     LF("  local _f=%s('return function(a,b)return a~b end');if type(_f)~='function' then error('Catify: missing bitwise support',0) end;%s=_f()", vLoadCompat, bXor)
@@ -1275,21 +1251,21 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Both forward-declared earlier; wiped immediately after use.
     LF("do")
     LF("  local %s={}", keyTbl)
-    LF("  local %s=%s;for %s=1,8 do %s[%s]=string.char(%s(%s:byte(%s),%s))end",
-       keyMask1, _obfInt(km[1]), keyIdx, keyTbl, keyIdx, bXor, vKp1, keyIdx, keyMask1)
-    LF("  local %s=%s;for %s=1,8 do %s[8+%s]=string.char(%s(%s:byte(%s),%s))end",
-       keyMask2, _obfInt(km[2]), keyIdx, keyTbl, keyIdx, bXor, vKp2, keyIdx, keyMask2)
-    LF("  local %s=%s;for %s=1,8 do %s[16+%s]=string.char(%s(%s:byte(%s),%s))end",
-       keyMask3, _obfInt(km[3]), keyIdx, keyTbl, keyIdx, bXor, vKp3, keyIdx, keyMask3)
-    LF("  local %s=%s;for %s=1,8 do %s[24+%s]=string.char(%s(%s:byte(%s),%s))end",
-       keyMask4, _obfInt(km[4]), keyIdx, keyTbl, keyIdx, bXor, vKp4, keyIdx, keyMask4)
+    LF("  local mask1=%s;for i=1,8 do %s[i]=string.char(%s(%s:byte(i),mask1))end",
+       _obfInt(km[1]), keyTbl, bXor, vKp1)
+    LF("  local mask2=%s;for i=1,8 do %s[8+i]=string.char(%s(%s:byte(i),mask2))end",
+       _obfInt(km[2]), keyTbl, bXor, vKp2)
+    LF("  local mask3=%s;for i=1,8 do %s[16+i]=string.char(%s(%s:byte(i),mask3))end",
+       _obfInt(km[3]), keyTbl, bXor, vKp3)
+    LF("  local mask4=%s;for i=1,8 do %s[24+i]=string.char(%s(%s:byte(i),mask4))end",
+       _obfInt(km[4]), keyTbl, bXor, vKp4)
     LF("  %s=table.concat(%s)", vKey, keyTbl)
     LF("  %s=nil;%s=nil;%s=nil;%s=nil;%s=nil", vKp1, vKp2, vKp3, vKp4, keyTbl)
     LF("  local %s={}", nonceTbl)
-    LF("  local %s=%s;for %s=1,4 do %s[%s]=string.char(%s(%s:byte(%s),%s))end",
-       nonceMask1, _obfInt(nm[1]), nonceIdx, nonceTbl, nonceIdx, bXor, vNp1, nonceIdx, nonceMask1)
-    LF("  local %s=%s;for %s=1,4 do %s[4+%s]=string.char(%s(%s:byte(%s),%s))end",
-       nonceMask2, _obfInt(nm[2]), nonceIdx, nonceTbl, nonceIdx, bXor, vNp2, nonceIdx, nonceMask2)
+    LF("  local nmask1=%s;for j=1,4 do %s[j]=string.char(%s(%s:byte(j),nmask1))end",
+       _obfInt(nm[1]), nonceTbl, bXor, vNp1)
+    LF("  local nmask2=%s;for j=1,4 do %s[4+j]=string.char(%s(%s:byte(j),nmask2))end",
+       _obfInt(nm[2]), nonceTbl, bXor, vNp2)
     LF("  %s=table.concat(%s)", vNonce, nonceTbl)
     LF("  %s=nil;%s=nil;%s=nil", vNp1, vNp2, nonceTbl)
     LF("end")
