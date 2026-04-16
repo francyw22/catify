@@ -27,7 +27,8 @@ function Utils.rand_name(min_len, max_len)
 
     local alpha = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
     local alnum = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-    while true do
+    local max_attempts = 1000
+    for _ = 1, max_attempts do
         local len = math.random(min_len, max_len)
         -- First character must be a letter (valid Lua identifier start)
         local first_idx = math.random(1, #alpha)
@@ -41,6 +42,7 @@ function Utils.rand_name(min_len, max_len)
             return name
         end
     end
+    error("Failed to generate a non-keyword Lua identifier")
 end
 
 --- Generate `count` unique random identifiers (no collisions)
