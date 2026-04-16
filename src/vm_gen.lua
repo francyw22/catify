@@ -1251,20 +1251,20 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Both forward-declared earlier; wiped immediately after use.
     LF("do")
     LF("  local %s={}", keyTbl)
-    LF("  local m=%s;for i=1,8 do %s[i]=string.char(%s(%s:byte(i),m))end",
+    LF("  local mask1=%s;for i=1,8 do %s[i]=string.char(%s(%s:byte(i),mask1))end",
        _obfInt(km[1]), keyTbl, bXor, vKp1)
-    LF("  local n=%s;for i=1,8 do %s[8+i]=string.char(%s(%s:byte(i),n))end",
+    LF("  local mask2=%s;for i=1,8 do %s[8+i]=string.char(%s(%s:byte(i),mask2))end",
        _obfInt(km[2]), keyTbl, bXor, vKp2)
-    LF("  local o=%s;for i=1,8 do %s[16+i]=string.char(%s(%s:byte(i),o))end",
+    LF("  local mask3=%s;for i=1,8 do %s[16+i]=string.char(%s(%s:byte(i),mask3))end",
        _obfInt(km[3]), keyTbl, bXor, vKp3)
-    LF("  local p=%s;for i=1,8 do %s[24+i]=string.char(%s(%s:byte(i),p))end",
+    LF("  local mask4=%s;for i=1,8 do %s[24+i]=string.char(%s(%s:byte(i),mask4))end",
        _obfInt(km[4]), keyTbl, bXor, vKp4)
     LF("  %s=table.concat(%s)", vKey, keyTbl)
     LF("  %s=nil;%s=nil;%s=nil;%s=nil;%s=nil", vKp1, vKp2, vKp3, vKp4, keyTbl)
     LF("  local %s={}", nonceTbl)
-    LF("  local q=%s;for j=1,4 do %s[j]=string.char(%s(%s:byte(j),q))end",
+    LF("  local nmask1=%s;for j=1,4 do %s[j]=string.char(%s(%s:byte(j),nmask1))end",
        _obfInt(nm[1]), nonceTbl, bXor, vNp1)
-    LF("  local r=%s;for j=1,4 do %s[4+j]=string.char(%s(%s:byte(j),r))end",
+    LF("  local nmask2=%s;for j=1,4 do %s[4+j]=string.char(%s(%s:byte(j),nmask2))end",
        _obfInt(nm[2]), nonceTbl, bXor, vNp2)
     LF("  %s=table.concat(%s)", vNonce, nonceTbl)
     LF("  %s=nil;%s=nil;%s=nil", vNp1, vNp2, nonceTbl)
