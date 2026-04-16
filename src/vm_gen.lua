@@ -434,16 +434,27 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         return _JN[i], _JN[j], _JN[k2]
     end
 
-    -- Single junk form only: dead assignment with the fixed marker string.
+    -- Single junk form: dead assignment with a random string in the style of "7fn.zIS1u@xj"
+    -- (short alphanumeric + symbol mix, valid for Luau string literals).
+    -- Pool: alphanumerics plus symbols that appear in the reference style and are safe
+    -- inside Luau double-quoted strings (no backslash, no double-quote, no newline).
+    local _JUNK_POOL = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" ..
+                       ".-_@#!+*=?/^~|<>(){}:;"
     local function _junk_quote(s)
         return string.format("%q", s)
     end
     local junk_forms = {
-        -- form 1: fixed marker string dead-code assignment
+        -- form 1: random symbol-style string dead-code assignment
         function(indent)
             local v1 = jpick()
-            local marker = "7fn.zIS1u@xj"
-            return indent.."do local "..v1.."=".._junk_quote(marker)..";if #"..v1.."<0 then "..v1.."=nil end end\n"
+            local len = math.random(8, 24)
+            local chars = {}
+            for i = 1, len do
+                local pos = math.random(1, #_JUNK_POOL)
+                chars[i] = _JUNK_POOL:sub(pos, pos)
+            end
+            local s = table.concat(chars)
+            return indent.."do local "..v1.."=".._junk_quote(s)..";if #"..v1.."<0 then "..v1.."=nil end end\n"
         end,
     }
     local function junk_stmt(indent)
