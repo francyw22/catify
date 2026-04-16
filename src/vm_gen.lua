@@ -1376,7 +1376,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         if trimmed then
             trimmed = trimmed:match("^(.-)%s*$")
         end
-        if trimmed and trimmed ~= "" and not trimmed:match("^%-%-") then
+        local is_line_comment = (trimmed == "--") or (trimmed and trimmed:match("^%-%-[^%[]"))
+        if trimmed and trimmed ~= "" and not is_line_comment then
             compact_lines[#compact_lines + 1] = trimmed
         end
     end
