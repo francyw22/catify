@@ -316,6 +316,9 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
             return utils.obfuscate_int_deep(n, bXor)
         end
     end
+    local function _obfByte(n)
+        return string.format("%s(%s,255)", bAnd, _obfInt(n))
+    end
 
     -- ── 3. Compute SHA-256 of the encrypted blob for anti-tamper ─────────────
     local blob_sha = utils.sha256(blob)
@@ -978,48 +981,48 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Key chunk 1 (bytes 1-8, each pre-XOR'd with km[1])
     do
         local t = {}
-        for bi = 1, 8 do t[bi] = _obfInt(key:byte(bi) ~ km[1]) end
+        for bi = 1, 8 do t[bi] = _obfByte(key:byte(bi) ~ km[1]) end
         LF("local %s=string.char(%s)", vKp1, table.concat(t, ","))
     end
     -- Key chunk 2 (bytes 9-16, each pre-XOR'd with km[2])
     do
         local t = {}
-        for bi = 1, 8 do t[bi] = _obfInt(key:byte(8+bi) ~ km[2]) end
+        for bi = 1, 8 do t[bi] = _obfByte(key:byte(8+bi) ~ km[2]) end
         LF("local %s=string.char(%s)", vKp2, table.concat(t, ","))
     end
     -- Key chunk 3 (bytes 17-24, each pre-XOR'd with km[3])
     do
         local t = {}
-        for bi = 1, 8 do t[bi] = _obfInt(key:byte(16+bi) ~ km[3]) end
+        for bi = 1, 8 do t[bi] = _obfByte(key:byte(16+bi) ~ km[3]) end
         LF("local %s=string.char(%s)", vKp3, table.concat(t, ","))
     end
     -- Key chunk 4 (bytes 25-32, each pre-XOR'd with km[4])
     do
         local t = {}
-        for bi = 1, 8 do t[bi] = _obfInt(key:byte(24+bi) ~ km[4]) end
+        for bi = 1, 8 do t[bi] = _obfByte(key:byte(24+bi) ~ km[4]) end
         LF("local %s=string.char(%s)", vKp4, table.concat(t, ","))
     end
     -- Nonce chunk 1 (bytes 1-4, each pre-XOR'd with nm[1])
     do
         local t = {}
-        for bi = 1, 4 do t[bi] = _obfInt(nonce:byte(bi) ~ nm[1]) end
+        for bi = 1, 4 do t[bi] = _obfByte(nonce:byte(bi) ~ nm[1]) end
         LF("local %s=string.char(%s)", vNp1, table.concat(t, ","))
     end
     -- Nonce chunk 2 (bytes 5-8, each pre-XOR'd with nm[2])
     do
         local t = {}
-        for bi = 1, 4 do t[bi] = _obfInt(nonce:byte(4+bi) ~ nm[2]) end
+        for bi = 1, 4 do t[bi] = _obfByte(nonce:byte(4+bi) ~ nm[2]) end
         LF("local %s=string.char(%s)", vNp2, table.concat(t, ","))
     end
     -- Decoy key fragments (random bytes, never used for actual decryption)
     do
         local t = {}
-        for bi = 1, 8 do t[bi] = _obfInt(math.random(0, 255)) end
+        for bi = 1, 8 do t[bi] = _obfByte(math.random(0, 255)) end
         LF("local %s=string.char(%s)", vDk1, table.concat(t, ","))
     end
     do
         local t = {}
-        for bi = 1, 8 do t[bi] = _obfInt(math.random(0, 255)) end
+        for bi = 1, 8 do t[bi] = _obfByte(math.random(0, 255)) end
         LF("local %s=string.char(%s)", vDk2, table.concat(t, ","))
     end
 
@@ -1093,7 +1096,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         local emsg = "Catify: integrity check failed"
         local emask = math.random(1, 255)
         local eparts = {}
-        for i = 1, #emsg do eparts[i] = _obfInt(emsg:byte(i) ~ emask) end
+        for i = 1, #emsg do eparts[i] = _obfByte(emsg:byte(i) ~ emask) end
         -- Split into chunks of 60 to stay within Lua's register limit.
         local echunks = {}
         for i = 1, #eparts, 60 do
@@ -1122,7 +1125,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         local mask = math.random(1, 255)
         local all_parts = {}
         for i = 1, #code_str do
-            all_parts[i] = _obfInt(code_str:byte(i) ~ mask)
+            all_parts[i] = _obfByte(code_str:byte(i) ~ mask)
         end
         local chunks = {}
         for i = 1, #all_parts, AT_CHUNK do
