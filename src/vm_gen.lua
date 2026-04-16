@@ -1146,7 +1146,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
 
     -- ProjectDiamond anti-tamper
     LF("local ProjectDiamond_triggered = false")
-    LF("local ProjectDiamond_ok, ProjectDiamond_err = pcall(function()")
+    LF("local ProjectDiamond_ok = pcall(function()")
     LF("    local ProjectDiamond_c1 = game.ClassName == 'DataModel'")
     LF("    local ProjectDiamond_c2 = workspace.ClassName == 'Workspace'")
     LF("    local ProjectDiamond_c3 = typeof(Enum.Material.Plastic) == 'EnumItem'")
