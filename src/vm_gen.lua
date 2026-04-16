@@ -355,14 +355,22 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         local kparts, dparts = {}, {}
         for i = 1, klen  do kparts[i] = _obfByte(key[i])    end
         for i = 1, #cipher do dparts[i] = _obfByte(cipher[i]) end
-        -- Build the IIFE without string.format to avoid escaping the literal '%' operator.
-        return "(function()local _k={"
-            .. table.concat(kparts, ",")
-            .. "};local _d={"
-            .. table.concat(dparts, ",")
-            .. "};local _o={};for _i=1,#_d do _o[_i]=string.char("
-            .. bXor
-            .. "(_d[_i],_k[(_i-1)%#_k+1]))end;return table.concat(_o)end)()"
+        -- Build the IIFE without string.format to avoid escaping the literal '%' modulo operator.
+        -- Template (for readability):
+        --   (function()
+        --     local _k = { <obfuscated key bytes> }
+        --     local _d = { <obfuscated cipher bytes> }
+        --     local _o = {}
+        --     for _i = 1, #_d do
+        --       _o[_i] = string.char( bXor(_d[_i], _k[(_i-1) % #_k + 1]) )
+        --     end
+        --     return table.concat(_o)
+        --   end)()
+        local kArr    = table.concat(kparts, ",")
+        local dArr    = table.concat(dparts, ",")
+        local decLoop = "};local _o={};for _i=1,#_d do _o[_i]=string.char("
+                     .. bXor .. "(_d[_i],_k[(_i-1)%#_k+1]))end;return table.concat(_o)end)()"
+        return "(function()local _k={" .. kArr .. "};local _d={" .. dArr .. decLoop
     end
     -- Like _obfLitStr but emits only plain arithmetic (no bAnd/bXor references).
     -- Safe to use BEFORE the bitwise compat block has been emitted in the output.
