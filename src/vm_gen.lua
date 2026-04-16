@@ -125,7 +125,7 @@ end
 -- Base91 uses only safe printable ASCII characters, making the output resilient
 -- to any third-party tool that processes or re-encodes the generated Lua file.
 local PAYLOAD_VAR_NAME = "superflow_bytecode"
-local ANTI_TAMPER_CHECK_COUNT = 20
+local ANTI_TAMPER_CHECK_COUNT = 32
 local function emit_payload_b91(b91str)
     -- Declare as local inside the wrapper function so it doesn't pollute global scope.
     return "local " .. PAYLOAD_VAR_NAME .. "=" .. string.format("%q", b91str) .. ";"
@@ -257,12 +257,34 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local atPassed  = vn()
     local atChkVal  = vn()
     local atMaterialEnums = vn()
+    local atLighting = vn()
     local atCheckVars = {}
     for i = 1, ANTI_TAMPER_CHECK_COUNT do
         atCheckVars[i] = vn()
     end
     -- Watermark variable name
     local vWm       = vn()
+    -- Extra randomized temp names for emitted anti-tamper/decode/watermark/key assembly code
+    local atHashEnc = vn()
+    local atHashDec = vn()
+    local atHashI = vn()
+    local atErrEnc = vn()
+    local atErrDec = vn()
+    local atErrI = vn()
+    local atEnvTbl = vn()
+    local wmTbl = vn()
+    local wmI = vn()
+    local wmV = vn()
+    local keyTbl = vn()
+    local keyMask1 = vn()
+    local keyMask2 = vn()
+    local keyMask3 = vn()
+    local keyMask4 = vn()
+    local keyIdx = vn()
+    local nonceTbl = vn()
+    local nonceMask1 = vn()
+    local nonceMask2 = vn()
+    local nonceIdx = vn()
     -- Bootstrap helper aliases
     local bsToStr   = vn()
     local bsType    = vn()
@@ -1124,8 +1146,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         end
         local hmask_expr = _obfInt(hmask)
         local hraw = table.concat(hchunks, "..")
-        LF("do local _eh=%s local _hd={} for _i=1,#_eh do _hd[_i]=string.char(%s(_eh:byte(_i),%s)) end %s=table.concat(_hd) end",
-           hraw, bXor, hmask_expr, atShaExp)
+        LF("do local %s=%s local %s={} for %s=1,#%s do %s[%s]=string.char(%s(%s:byte(%s),%s)) end %s=table.concat(%s) end",
+           atHashEnc, hraw, atHashDec, atHashI, atHashEnc, atHashDec, atHashI, bXor, atHashEnc, atHashI, hmask_expr, atShaExp, atHashDec)
     end
     -- Obfuscate the integrity-check error message so it doesn't appear as plaintext.
     do
@@ -1143,29 +1165,29 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         -- The XOR decode is inlined as a function expression; emask is obfuscated.
         local emask_expr = _obfInt(emask)
         local eraw = table.concat(echunks, "..")
-        LF("if %s~=%s then local _em=%s local _ed={} for _i=1,#_em do _ed[_i]=string.char(%s(_em:byte(_i),%s)) end error(table.concat(_ed),0) end",
-           atSha, atShaExp, eraw, bXor, emask_expr)
+        LF("if %s~=%s then local %s=%s local %s={} for %s=1,#%s do %s[%s]=string.char(%s(%s:byte(%s),%s)) end error(table.concat(%s),0) end",
+           atSha, atShaExp, atErrEnc, eraw, atErrDec, atErrI, atErrEnc, atErrDec, atErrI, bXor, atErrEnc, atErrI, emask_expr, atErrDec)
     end
 
-    local env_expr = "((function() local _e=((type(_ENV)=='table' and _ENV) or (type(getfenv)=='function' and getfenv(0)) or (type(_G)=='table' and _G) or {}); return (type(_e)=='table' and _e) or {} end)())"
+    local env_expr = string.format("((function() local %s=((type(_ENV)=='table' and _ENV) or (type(getfenv)=='function' and getfenv(0)) or (type(_G)=='table' and _G) or {}); return (type(%s)=='table' and %s) or {} end)())", atEnvTbl, atEnvTbl, atEnvTbl)
 
-    -- Stealth anti-tamper
+    -- Stealth anti-tamper (all string literals obfuscated via _obfLitStr)
     LF("local %s = false", atTrig)
     LF("local %s = pcall(function()", atOk)
-    LF("    local %s = game.ClassName == 'DataModel'", atCheckVars[1])
-    LF("    local %s = workspace.ClassName == 'Workspace'", atCheckVars[2])
-    LF("    local %s = typeof(Enum.Material.Plastic) == 'EnumItem'", atCheckVars[3])
+    LF("    local %s = game.ClassName == %s", atCheckVars[1], _obfLitStr("DataModel"))
+    LF("    local %s = workspace.ClassName == %s", atCheckVars[2], _obfLitStr("Workspace"))
+    LF("    local %s = typeof(Enum.Material.Plastic) == %s", atCheckVars[3], _obfLitStr("EnumItem"))
     LF("    local %s = Enum.Material.Plastic.Value == 256", atCheckVars[4])
-    LF("    local %s = typeof(game.Changed) == 'RBXScriptSignal'", atCheckVars[5])
-    LF("    local %s = typeof(workspace.Changed) == 'RBXScriptSignal'", atCheckVars[6])
-    LF("    local %s = game:GetService('RunService')", atRs)
-    LF("    local %s = %s.ClassName == 'RunService'", atCheckVars[7], atRs)
-    LF("    local %s = typeof(%s.Heartbeat) == 'RBXScriptSignal'", atCheckVars[8], atRs)
+    LF("    local %s = typeof(game.Changed) == %s", atCheckVars[5], _obfLitStr("RBXScriptSignal"))
+    LF("    local %s = typeof(workspace.Changed) == %s", atCheckVars[6], _obfLitStr("RBXScriptSignal"))
+    LF("    local %s = game:GetService(%s)", atRs, _obfLitStr("RunService"))
+    LF("    local %s = %s.ClassName == %s", atCheckVars[7], atRs, _obfLitStr("RunService"))
+    LF("    local %s = typeof(%s.Heartbeat) == %s", atCheckVars[8], atRs, _obfLitStr("RBXScriptSignal"))
     LF("    local %s = %s:IsClient() ~= %s:IsServer()", atCheckVars[9], atRs, atRs)
-    LF("    local %s = Instance.new('Part')", atPart)
-    LF("    local %s = typeof(%s) == 'Instance' and %s.ClassName == 'Part'", atCheckVars[10], atPart, atPart)
+    LF("    local %s = Instance.new(%s)", atPart, _obfLitStr("Part"))
+    LF("    local %s = typeof(%s) == %s and %s.ClassName == %s", atCheckVars[10], atPart, _obfLitStr("Instance"), atPart, _obfLitStr("Part"))
     LF("    %s:Destroy()", atPart)
-    LF("    local %s = workspace:GetFullName() == 'Workspace'", atCheckVars[11])
+    LF("    local %s = workspace:GetFullName() == %s", atCheckVars[11], _obfLitStr("Workspace"))
     LF("    local %s = CFrame.new(1, 2, 3)", atCf)
     LF("    local %s = %s.X == 1 and %s.Y == 2 and %s.Z == 3", atCheckVars[12], atCf, atCf, atCf)
     LF("    local %s = workspace.DistributedGameTime", atT1)
@@ -1173,26 +1195,54 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("    local %s = workspace.DistributedGameTime", atT2)
     LF("    local %s = (%s - %s) > 0", atCheckVars[13], atT2, atT1)
     LF("    local %s, %s = pcall(function()", atGuidOk, atGuid)
-    LF("        return game:GetService('HttpService'):GenerateGUID(false)")
+    LF("        return game:GetService(%s):GenerateGUID(false)", _obfLitStr("HttpService"))
     LF("    end)")
-    LF("    local %s = %s and #%s == 36 and %s:sub(9,9) == '-'", atCheckVars[14], atGuidOk, atGuid, atGuid)
+    LF("    local %s = %s and #%s == 36 and %s:sub(9,9) == %s", atCheckVars[14], atGuidOk, atGuid, atGuid, _obfLitStr("-"))
     LF("    local %s = Enum.Material:GetEnumItems()", atMaterialEnums)
-    LF("    local %s = typeof(%s) == 'table' and #%s > 0", atCheckVars[15], atMaterialEnums, atMaterialEnums)
-    LF("    local %s = typeof(task.spawn) == 'function' and typeof(task.delay) == 'function'", atCheckVars[16])
-    LF("    local %s = typeof(game.GetService) == 'function' and typeof(game.FindFirstChild) == 'function'", atCheckVars[17])
-    LF("    local %s = game:GetService('Players')", atPlayers)
-    LF("    local %s = typeof(%s) == 'Instance' and %s.ClassName == 'Players'", atCheckVars[18], atPlayers, atPlayers)
-    LF("    local %s = Instance.new('Folder')", atFolder)
-    LF("    local %s = typeof(%s) == 'Instance' and %s.ClassName == 'Folder'", atCheckVars[19], atFolder, atFolder)
+    LF("    local %s = typeof(%s) == %s and #%s > 0", atCheckVars[15], atMaterialEnums, _obfLitStr("table"), atMaterialEnums)
+    LF("    local %s = typeof(task.spawn) == %s and typeof(task.delay) == %s", atCheckVars[16], _obfLitStr("function"), _obfLitStr("function"))
+    LF("    local %s = typeof(game.GetService) == %s and typeof(game.FindFirstChild) == %s", atCheckVars[17], _obfLitStr("function"), _obfLitStr("function"))
+    LF("    local %s = game:GetService(%s)", atPlayers, _obfLitStr("Players"))
+    LF("    local %s = typeof(%s) == %s and %s.ClassName == %s", atCheckVars[18], atPlayers, _obfLitStr("Instance"), atPlayers, _obfLitStr("Players"))
+    LF("    local %s = Instance.new(%s)", atFolder, _obfLitStr("Folder"))
+    LF("    local %s = typeof(%s) == %s and %s.ClassName == %s", atCheckVars[19], atFolder, _obfLitStr("Instance"), atFolder, _obfLitStr("Folder"))
     LF("    %s:Destroy()", atFolder)
-    LF("    local %s = game:GetService('HttpService')", atHttp)
-    LF("    local %s = typeof(%s) == 'Instance' and %s.ClassName == 'HttpService' and typeof(%s.GenerateGUID) == 'function'", atCheckVars[20], atHttp, atHttp, atHttp)
+    LF("    local %s = game:GetService(%s)", atHttp, _obfLitStr("HttpService"))
+    LF("    local %s = typeof(%s) == %s and %s.ClassName == %s and typeof(%s.GenerateGUID) == %s", atCheckVars[20], atHttp, _obfLitStr("Instance"), atHttp, _obfLitStr("HttpService"), atHttp, _obfLitStr("function"))
+    -- Check 21: game has no Lua-level proxy metatable
+    LF("    local %s = getmetatable(game) == nil", atCheckVars[21])
+    -- Check 22: Vector3 is a native Roblox/Luau type and arithmetic is real
+    LF("    local %s = typeof(Vector3.new(1, 2, 3)) == %s and Vector3.new(1, 2, 3).Magnitude > 0", atCheckVars[22], _obfLitStr("Vector3"))
+    -- Check 23: Color3 is a native Roblox/Luau type
+    LF("    local %s = typeof(Color3.new(0, 0, 0)) == %s", atCheckVars[23], _obfLitStr("Color3"))
+    -- Check 24: ReplicatedStorage must exist as a real Roblox service
+    LF("    local %s = game:GetService(%s).ClassName == %s", atCheckVars[24], _obfLitStr("ReplicatedStorage"), _obfLitStr("ReplicatedStorage"))
+    -- Check 25: game.PlaceId is a numeric DataModel property
+    LF("    local %s = typeof(game.PlaceId) == %s", atCheckVars[25], _obfLitStr("number"))
+    -- Check 26: Enum.NormalId is a distinct Roblox enum with exact value
+    LF("    local %s = typeof(Enum.NormalId.Front) == %s and Enum.NormalId.Front.Value == 0", atCheckVars[26], _obfLitStr("EnumItem"))
+    -- Check 27: TweenInfo is a native Roblox/Luau constructor type
+    LF("    local %s = typeof(TweenInfo.new(1)) == %s", atCheckVars[27], _obfLitStr("TweenInfo"))
+    -- Check 28: BrickColor is a native Roblox/Luau type
+    LF("    local %s = typeof(BrickColor.new(%s)) == %s", atCheckVars[28], _obfLitStr("Medium stone gray"), _obfLitStr("BrickColor"))
+    -- Check 29: Lighting service exists as a real Roblox service
+    LF("    local %s = game:GetService(%s)", atLighting, _obfLitStr("Lighting"))
+    LF("    local %s = typeof(%s) == %s and %s.ClassName == %s", atCheckVars[29], atLighting, _obfLitStr("Instance"), atLighting, _obfLitStr("Lighting"))
+    -- Check 30: CFrame default look vector is (0,0,-1) — a real CFrame-specific property
+    LF("    local %s = CFrame.new(0, 0, 0).LookVector == Vector3.new(0, 0, -1)", atCheckVars[30])
+    -- Check 31: game.JobId is a string property (DataModel-specific)
+    LF("    local %s = typeof(game.JobId) == %s", atCheckVars[31], _obfLitStr("string"))
+    -- Check 32: Enum.KeyCode with exact numeric value (hard to spoof without enum implementation)
+    LF("    local %s = typeof(Enum.KeyCode.A) == %s and Enum.KeyCode.A.Value == 65", atCheckVars[32], _obfLitStr("EnumItem"))
     LF("    local %s = {", atChecks)
     LF("        %s, %s, %s, %s,", atCheckVars[1], atCheckVars[2], atCheckVars[3], atCheckVars[4])
     LF("        %s, %s, %s, %s,", atCheckVars[5], atCheckVars[6], atCheckVars[7], atCheckVars[8])
     LF("        %s, %s, %s, %s,", atCheckVars[9], atCheckVars[10], atCheckVars[11], atCheckVars[12])
     LF("        %s, %s, %s, %s,", atCheckVars[13], atCheckVars[14], atCheckVars[15], atCheckVars[16])
-    LF("        %s, %s, %s, %s", atCheckVars[17], atCheckVars[18], atCheckVars[19], atCheckVars[20])
+    LF("        %s, %s, %s, %s,", atCheckVars[17], atCheckVars[18], atCheckVars[19], atCheckVars[20])
+    LF("        %s, %s, %s, %s,", atCheckVars[21], atCheckVars[22], atCheckVars[23], atCheckVars[24])
+    LF("        %s, %s, %s, %s,", atCheckVars[25], atCheckVars[26], atCheckVars[27], atCheckVars[28])
+    LF("        %s, %s, %s, %s", atCheckVars[29], atCheckVars[30], atCheckVars[31], atCheckVars[32])
     LF("    }")
     LF("    local %s = 0", atPassed)
     LF("    for _, %s in ipairs(%s) do", atChkVal, atChecks)
@@ -1216,32 +1266,32 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local wm_bytes = {32,32,47,92,95,47,92,32,32,10,32,40,111,46,111,32,41,10,32,32,62,32,94,32,60,10,32,67,97,116,105,102,121,32,118,50,46,48}
     local wm_parts = {}
     for i = 1, #wm_bytes do wm_parts[i] = tostring(wm_bytes[i]) end
-    LF("local %s=table.concat((function()local _t={};for _i,_v in ipairs({%s})do _t[_i]=string.char(_v)end;return _t end)())",
-       vWm, table.concat(wm_parts, ","))
+    LF("local %s=table.concat((function()local %s={};for %s,%s in ipairs({%s})do %s[%s]=string.char(%s)end;return %s end)())",
+       vWm, wmTbl, wmI, wmV, table.concat(wm_parts, ","), wmTbl, wmI, wmV, wmTbl)
 
     -- Decrypt and deserialize
     -- Assemble the real key from 4 pre-masked chunks (runtime unmask).
     -- Assemble the real nonce from 2 pre-masked chunks.
     -- Both forward-declared earlier; wiped immediately after use.
     LF("do")
-    LF("  local _kt={}")
-    LF("  local _km1=%s;for _j=1,8 do _kt[_j]=string.char(%s(%s:byte(_j),_km1))end",
-       _obfInt(km[1]), bXor, vKp1)
-    LF("  local _km2=%s;for _j=1,8 do _kt[8+_j]=string.char(%s(%s:byte(_j),_km2))end",
-       _obfInt(km[2]), bXor, vKp2)
-    LF("  local _km3=%s;for _j=1,8 do _kt[16+_j]=string.char(%s(%s:byte(_j),_km3))end",
-       _obfInt(km[3]), bXor, vKp3)
-    LF("  local _km4=%s;for _j=1,8 do _kt[24+_j]=string.char(%s(%s:byte(_j),_km4))end",
-       _obfInt(km[4]), bXor, vKp4)
-    LF("  %s=table.concat(_kt)", vKey)
-    LF("  %s=nil;%s=nil;%s=nil;%s=nil;_kt=nil", vKp1, vKp2, vKp3, vKp4)
-    LF("  local _nt={}")
-    LF("  local _nm1=%s;for _j=1,4 do _nt[_j]=string.char(%s(%s:byte(_j),_nm1))end",
-       _obfInt(nm[1]), bXor, vNp1)
-    LF("  local _nm2=%s;for _j=1,4 do _nt[4+_j]=string.char(%s(%s:byte(_j),_nm2))end",
-       _obfInt(nm[2]), bXor, vNp2)
-    LF("  %s=table.concat(_nt)", vNonce)
-    LF("  %s=nil;%s=nil;_nt=nil", vNp1, vNp2)
+    LF("  local %s={}", keyTbl)
+    LF("  local %s=%s;for %s=1,8 do %s[%s]=string.char(%s(%s:byte(%s),%s))end",
+       keyMask1, _obfInt(km[1]), keyIdx, keyTbl, keyIdx, bXor, vKp1, keyIdx, keyMask1)
+    LF("  local %s=%s;for %s=1,8 do %s[8+%s]=string.char(%s(%s:byte(%s),%s))end",
+       keyMask2, _obfInt(km[2]), keyIdx, keyTbl, keyIdx, bXor, vKp2, keyIdx, keyMask2)
+    LF("  local %s=%s;for %s=1,8 do %s[16+%s]=string.char(%s(%s:byte(%s),%s))end",
+       keyMask3, _obfInt(km[3]), keyIdx, keyTbl, keyIdx, bXor, vKp3, keyIdx, keyMask3)
+    LF("  local %s=%s;for %s=1,8 do %s[24+%s]=string.char(%s(%s:byte(%s),%s))end",
+       keyMask4, _obfInt(km[4]), keyIdx, keyTbl, keyIdx, bXor, vKp4, keyIdx, keyMask4)
+    LF("  %s=table.concat(%s)", vKey, keyTbl)
+    LF("  %s=nil;%s=nil;%s=nil;%s=nil;%s=nil", vKp1, vKp2, vKp3, vKp4, keyTbl)
+    LF("  local %s={}", nonceTbl)
+    LF("  local %s=%s;for %s=1,4 do %s[%s]=string.char(%s(%s:byte(%s),%s))end",
+       nonceMask1, _obfInt(nm[1]), nonceIdx, nonceTbl, nonceIdx, bXor, vNp1, nonceIdx, nonceMask1)
+    LF("  local %s=%s;for %s=1,4 do %s[4+%s]=string.char(%s(%s:byte(%s),%s))end",
+       nonceMask2, _obfInt(nm[2]), nonceIdx, nonceTbl, nonceIdx, bXor, vNp2, nonceIdx, nonceMask2)
+    LF("  %s=table.concat(%s)", vNonce, nonceTbl)
+    LF("  %s=nil;%s=nil;%s=nil", vNp1, vNp2, nonceTbl)
     LF("end")
     LF("%s=%s(%s,%s,%s)", vBlob, vDecrypt, vBlob, vKey, vNonce)
     LF("%s=nil;%s=nil;%s=nil;%s=nil;%s=nil", vKey, vNonce, vDecrypt, vDk1, vDk2)   -- wipe key, nonce, decryptor, decoys
