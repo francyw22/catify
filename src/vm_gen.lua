@@ -1186,10 +1186,11 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local env_expr = string.format("((function() local %s=((type(_ENV)=='table' and _ENV) or (type(getfenv)=='function' and getfenv(0)) or (type(_G)=='table' and _G) or {}); return (type(%s)=='table' and %s) or {} end)())", atEnvTbl, atEnvTbl, atEnvTbl)
 
     -- Minimal anti-tamper surface: only verify delayed callback availability.
-    LF("local %s, %s = pcall(function()", atOk, atTrig)
+    LF("local %s, %s = pcall(function()", atOk, atChkVal)
     LF("    return typeof(task) == %s and typeof(task.delay) == %s", _obfLitStr("table"), _obfLitStr("function"))
     LF("end)")
-    LF("if not %s or not %s then", atOk, atTrig)
+    LF("local %s = (not %s) or (not %s)", atTrig, atOk, atChkVal)
+    LF("if %s then", atTrig)
     LF("    task.delay(math.random(6, 7), function()")
     LF("        print('Detected by catify :3')")
     LF("    end)")
