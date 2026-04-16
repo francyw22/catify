@@ -445,6 +445,11 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     --  form 8: string.rep + #  identity
     --  form 9: fake config table with dead branch (looks like real init code)
     --  form 10: fake string sanitize (dead upper/lower branch)
+    -- Shared pool for forms 15-18: all printable ASCII valid in Luau long strings,
+    -- excluding ']' (would close [=[...]=]) and '%' (would corrupt string.format calls
+    -- in the generator). Only Luau/Roblox-safe ASCII characters are included.
+    local _JUNK_POOL = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" ..
+                       "!\"#$&'()*+,-./:;<=>?@[\\^_`{|}~"
     local junk_forms = {
         -- form 1: x XOR x == 0
         function(indent)
@@ -578,53 +583,43 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         -- form 15: random garbage-string dead-code assignment (looks like obfuscated data/token)
         -- Generates a fresh random string of 300-1500 printable ASCII chars (mix of alphanumeric
         -- and Luau-valid symbols) each time; dead branch guarantees it never executes.
-        -- ']' is excluded to avoid closing [=[...]=]; '%' is excluded to prevent string.format
-        -- injection in the generator; only ASCII symbols valid in Luau/Roblox are used.
-        -- String concatenation is used instead of string.format for the return value so that
-        -- special chars in the garbage cannot corrupt the format string.
+        -- Uses _JUNK_POOL (no ']' or '%'); string concatenation avoids format-string injection.
         function(indent)
-            local _pool = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" ..
-                          "!\"#$&'()*+,-./:;<=>?@[\\^_`{|}~"
             local len = math.random(300, 1500)
             local chars = {}
             for i = 1, len do
-                local pos = math.random(1, #_pool)
-                chars[i] = _pool:sub(pos, pos)
+                local pos = math.random(1, #_JUNK_POOL)
+                chars[i] = _JUNK_POOL:sub(pos, pos)
             end
             local garbage = table.concat(chars)
             local v1 = jpick()
             return indent.."do local "..v1.."=[=["..garbage.."]=];if #"..v1.."<0 then "..v1.."=nil end end\n"
         end,
-        -- form 16: very large symbol-heavy garbage string (8 000–20 000 chars)
-        -- Uses only Luau-valid ASCII symbols; excludes ']' and '%'.
-        -- Concatenation-built return avoids format-string injection.
+        -- form 16: very large symbol-heavy garbage string (8000-20000 chars).
+        -- Uses _JUNK_POOL (Luau-valid ASCII only); concatenation return avoids format-string injection.
         function(indent)
-            local _pool = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" ..
-                          "!\"#$&'()*+,-./:;<=>?@[\\^_`{|}~"
             local len = math.random(8000, 20000)
             local chars = {}
             for i = 1, len do
-                local pos = math.random(1, #_pool)
-                chars[i] = _pool:sub(pos, pos)
+                local pos = math.random(1, #_JUNK_POOL)
+                chars[i] = _JUNK_POOL:sub(pos, pos)
             end
             local garbage = table.concat(chars)
             local v1 = jpick()
             return indent.."do local "..v1.."=[=["..garbage.."]=];if #"..v1.."<0 then "..v1.."=nil end end\n"
         end,
-        -- form 17: dead multi-string array — builds 50–150 symbol-heavy strings into a
+        -- form 17: dead multi-string array — builds 50-150 symbol-heavy strings into a
         -- table array and concatenates them; dead branch discards the result.
-        -- Each entry is 30–150 Luau-valid ASCII chars; total output 1 500–22 500 chars.
+        -- Each entry is 30-150 Luau-valid ASCII chars; total output 1500-22500 chars.
         function(indent)
-            local _pool = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" ..
-                          "!\"#$&'()*+,-./:;<=>?@[\\^_`{|}~"
             local count = math.random(50, 150)
             local entries = {}
             for i = 1, count do
                 local slen = math.random(30, 150)
                 local chars = {}
                 for j = 1, slen do
-                    local pos = math.random(1, #_pool)
-                    chars[j] = _pool:sub(pos, pos)
+                    local pos = math.random(1, #_JUNK_POOL)
+                    chars[j] = _JUNK_POOL:sub(pos, pos)
                 end
                 entries[i] = "[=["..table.concat(chars).."]=]"
             end
@@ -632,20 +627,18 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
             local tbl = table.concat(entries, ",")
             return indent.."do local "..v1.."={"..tbl.."};local "..v2.."=table.concat("..v1..");if #"..v2.."<0 then "..v2.."=nil end end\n"
         end,
-        -- form 18: dead symbol-string array — 20–60 Luau-valid ASCII symbol strings stored
+        -- form 18: dead symbol-string array — 20-60 Luau-valid ASCII symbol strings stored
         -- in a table, length-checked, then discarded via always-false branch. Each string
-        -- 20–80 chars. Concatenation-built return; no string.format injection risk.
+        -- 20-80 chars. Concatenation-built return; no string.format injection risk.
         function(indent)
-            local _pool = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" ..
-                          "!\"#$&'()*+,-./:;<=>?@[\\^_`{|}~"
             local count = math.random(20, 60)
             local entries = {}
             for i = 1, count do
                 local vlen = math.random(20, 80)
                 local vchars = {}
                 for j = 1, vlen do
-                    local pos = math.random(1, #_pool)
-                    vchars[j] = _pool:sub(pos, pos)
+                    local pos = math.random(1, #_JUNK_POOL)
+                    vchars[j] = _JUNK_POOL:sub(pos, pos)
                 end
                 entries[i] = "[=["..table.concat(vchars).."]=]"
             end
