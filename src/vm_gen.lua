@@ -330,6 +330,20 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         for i = 1, #s do parts[i] = _obfByte(s:byte(i)) end
         return string.format("string.char(%s)", table.concat(parts, ","))
     end
+    -- Like _obfLitStr but emits only plain arithmetic (no bAnd/bXor references).
+    -- Safe to use BEFORE the bitwise compat block has been emitted in the output.
+    -- Each byte is split into high/low nibbles; the generated code reconstructs
+    -- the byte as (h*16+l) — no library function needed.
+    local function _earlyLitStr(s)
+        local parts = {}
+        for i = 1, #s do
+            local b = s:byte(i)
+            local h = (b >> 4) & 0xF   -- high nibble (generator-side, Lua 5.3)
+            local lo = b & 0xF          -- low  nibble
+            parts[i] = string.format("(%d*16+%d)", h, lo)
+        end
+        return string.format("string.char(%s)", table.concat(parts, ","))
+    end
 
     -- ── 3. Compute SHA-256 of the encrypted blob for anti-tamper ─────────────
     local blob_sha = utils.sha256(blob)
@@ -508,7 +522,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- compile native Lua 5.3 operators via loader so the Luau parser never sees ~, &, |, <<, >>
     LF("local %s,%s,%s,%s,%s,%s", bXor,bNot,bAnd,bOr,bShl,bShr)
     LF("local %s,%s,%s,%s,%s,%s=%s,%s,%s,%s,%s,%s", b32Bx,b32Bn,b32Ba,b32Bo,b32Ls,b32Rs,
-       _obfLitStr("bxor"),_obfLitStr("bnot"),_obfLitStr("band"),_obfLitStr("bor"),_obfLitStr("lshift"),_obfLitStr("rshift"))
+       _earlyLitStr("bxor"),_earlyLitStr("bnot"),_earlyLitStr("band"),_earlyLitStr("bor"),_earlyLitStr("lshift"),_earlyLitStr("rshift"))
     LF("local bit32Available=type(bit32)=='table' and type(bit32[%s])=='function' and type(bit32[%s])=='function' and type(bit32[%s])=='function' and type(bit32[%s])=='function'", b32Bx,b32Bn,b32Ba,b32Bo)
     LF("if bit32Available then")
     LF("  %s=bit32[%s];%s=bit32[%s];%s=bit32[%s];%s=bit32[%s]", bXor,b32Bx,bNot,b32Bn,bAnd,b32Ba,bOr,b32Bo)
