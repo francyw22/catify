@@ -187,7 +187,6 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local vNonce    = vn()   -- nonce variable name
     -- SHA-256 inline variables
     local shaFn     = vn()   -- sha256 function name
-    local shaK      = vn()   -- K constants table name (unused var, kept for naming pool)
     local shaH      = vn()   -- hash state name
     local shaW      = vn()   -- message schedule name
     -- Base91 inline decoder variables
@@ -237,23 +236,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local eI        = vn()
     local eT        = vn()
     -- anti-tamper names (atPayload is now the fixed string "superflow_bytecode")
-    local atCrc     = vn()   -- expected CRC variable
-    local atCalc    = vn()   -- computed CRC variable
-    local atDbg     = vn()   -- debug reference (kept for SHA block)
     local vStrXor   = vn()   -- string-constant XOR key (second encryption layer)
-    local atVer     = vn()   -- Lua version check scratch
-    local atRaw     = vn()   -- raw* functions check scratch
-    -- Anti-keylogger variable names
-    local atKl1     = vn()
-    local atKl2     = vn()
-    local atKl3     = vn()
-    local atKl4     = vn()
-    -- Anti-environmental logger variable names
-    local atEnv1    = vn()
-    local atEnv2    = vn()
-    local atEnv3    = vn()
-    -- Anti-tamper block executor (XOR decoder + load())
-    local vAtExec   = vn()
     -- SHA-256 integrity check variable names
     local atSha     = vn()
     local atShaExp  = vn()
