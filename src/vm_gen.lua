@@ -579,7 +579,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         -- ']' is excluded from the pool so the value is always safe inside [=[...]=].
         function(indent)
             local _pool = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" ..
-                          "!+#;)/_%<>=^~&.${@|,?*(:!}~`\""
+                          "!+#;)/_%<>=^~&.${@|,?*(:}`\""
             local len = math.random(80, 200)
             local chars = {}
             for i = 1, len do
