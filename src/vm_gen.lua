@@ -330,10 +330,39 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local function _obfByte(n)
         return string.format("%s(%s,255)", bAnd, _obfInt(n))
     end
+    -- _obfLitStr: emit a self-contained IIFE that recovers the original string via
+    -- a rolling-XOR decode loop at runtime.  Approach:
+    --   1. Pick a random N-byte rolling key  (N = 3-8, chosen fresh per call).
+    --   2. XOR each plaintext byte with key[(i-1)%N + 1] → ciphertext.
+    --   3. Emit both key bytes and ciphertext bytes through _obfByte (arithmetic noise + band mask).
+    --   4. The runtime loop: string.char(bXor(cipher[i], key[(i-1)%N+1])) recovers the byte.
+    -- This is much stronger than the previous flat string.char() approach because:
+    --   • No single byte's value is visible in isolation.
+    --   • Recovering the plaintext requires evaluating the full loop AND the key.
+    --   • Each call produces a unique key, so identical strings differ across protected files.
     local function _obfLitStr(s)
-        local parts = {}
-        for i = 1, #s do parts[i] = _obfByte(s:byte(i)) end
-        return string.format("string.char(%s)", table.concat(parts, ","))
+        if #s == 0 then return '""' end
+        -- Fresh random key for this string.
+        local klen = math.random(3, 8)
+        local key = {}
+        for i = 1, klen do key[i] = math.random(0, 255) end
+        -- XOR-encrypt the plaintext bytes with the rolling key.
+        local cipher = {}
+        for i = 1, #s do
+            cipher[i] = s:byte(i) ~ key[((i - 1) % klen) + 1]
+        end
+        -- Obfuscate each key byte and cipher byte with _obfByte (arithmetic + band mask).
+        local kparts, dparts = {}, {}
+        for i = 1, klen  do kparts[i] = _obfByte(key[i])    end
+        for i = 1, #cipher do dparts[i] = _obfByte(cipher[i]) end
+        -- Build the IIFE without string.format to avoid escaping the literal '%' operator.
+        return "(function()local _k={"
+            .. table.concat(kparts, ",")
+            .. "};local _d={"
+            .. table.concat(dparts, ",")
+            .. "};local _o={};for _i=1,#_d do _o[_i]=string.char("
+            .. bXor
+            .. "(_d[_i],_k[(_i-1)%#_k+1]))end;return table.concat(_o)end)()"
     end
     -- Like _obfLitStr but emits only plain arithmetic (no bAnd/bXor references).
     -- Safe to use BEFORE the bitwise compat block has been emitted in the output.
