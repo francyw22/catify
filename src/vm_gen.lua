@@ -163,7 +163,6 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
 
     -- Core names
     local vExec     = vn()   -- main execute function
-    local vDeser    = vn()   -- deserializer function
     local vDecrypt  = vn()   -- RC4 decrypt function
     local vKey      = vn()   -- RC4 key string
     local vBlob     = vn()   -- encrypted bytecode blob
@@ -219,7 +218,6 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local eBx       = vn()
     local eSBx      = vn()
     local eRk       = vn()
-    local eRet      = vn()
     local eCallArgs = vn()
     local eNargs    = vn()
     local eResults  = vn()
@@ -273,15 +271,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local wmI = vn()
     local wmV = vn()
     local keyTbl = vn()
-    local keyMask1 = vn()
-    local keyMask2 = vn()
-    local keyMask3 = vn()
-    local keyMask4 = vn()
-    local keyIdx = vn()
     local nonceTbl = vn()
-    local nonceMask1 = vn()
-    local nonceMask2 = vn()
-    local nonceIdx = vn()
     -- Bootstrap helper aliases
     local bsToStr   = vn()
     local bsType    = vn()
@@ -1261,21 +1251,21 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Both forward-declared earlier; wiped immediately after use.
     LF("do")
     LF("  local %s={}", keyTbl)
-    LF("  local %s=%s;for %s=1,8 do %s[%s]=string.char(%s(%s:byte(%s),%s))end",
-       keyMask1, _obfInt(km[1]), keyIdx, keyTbl, keyIdx, bXor, vKp1, keyIdx, keyMask1)
-    LF("  local %s=%s;for %s=1,8 do %s[8+%s]=string.char(%s(%s:byte(%s),%s))end",
-       keyMask2, _obfInt(km[2]), keyIdx, keyTbl, keyIdx, bXor, vKp2, keyIdx, keyMask2)
-    LF("  local %s=%s;for %s=1,8 do %s[16+%s]=string.char(%s(%s:byte(%s),%s))end",
-       keyMask3, _obfInt(km[3]), keyIdx, keyTbl, keyIdx, bXor, vKp3, keyIdx, keyMask3)
-    LF("  local %s=%s;for %s=1,8 do %s[24+%s]=string.char(%s(%s:byte(%s),%s))end",
-       keyMask4, _obfInt(km[4]), keyIdx, keyTbl, keyIdx, bXor, vKp4, keyIdx, keyMask4)
+    LF("  local m=%s;for i=1,8 do %s[i]=string.char(%s(%s:byte(i),m))end",
+       _obfInt(km[1]), keyTbl, bXor, vKp1)
+    LF("  local n=%s;for i=1,8 do %s[8+i]=string.char(%s(%s:byte(i),n))end",
+       _obfInt(km[2]), keyTbl, bXor, vKp2)
+    LF("  local o=%s;for i=1,8 do %s[16+i]=string.char(%s(%s:byte(i),o))end",
+       _obfInt(km[3]), keyTbl, bXor, vKp3)
+    LF("  local p=%s;for i=1,8 do %s[24+i]=string.char(%s(%s:byte(i),p))end",
+       _obfInt(km[4]), keyTbl, bXor, vKp4)
     LF("  %s=table.concat(%s)", vKey, keyTbl)
     LF("  %s=nil;%s=nil;%s=nil;%s=nil;%s=nil", vKp1, vKp2, vKp3, vKp4, keyTbl)
     LF("  local %s={}", nonceTbl)
-    LF("  local %s=%s;for %s=1,4 do %s[%s]=string.char(%s(%s:byte(%s),%s))end",
-       nonceMask1, _obfInt(nm[1]), nonceIdx, nonceTbl, nonceIdx, bXor, vNp1, nonceIdx, nonceMask1)
-    LF("  local %s=%s;for %s=1,4 do %s[4+%s]=string.char(%s(%s:byte(%s),%s))end",
-       nonceMask2, _obfInt(nm[2]), nonceIdx, nonceTbl, nonceIdx, bXor, vNp2, nonceIdx, nonceMask2)
+    LF("  local q=%s;for j=1,4 do %s[j]=string.char(%s(%s:byte(j),q))end",
+       _obfInt(nm[1]), nonceTbl, bXor, vNp1)
+    LF("  local r=%s;for j=1,4 do %s[4+j]=string.char(%s(%s:byte(j),r))end",
+       _obfInt(nm[2]), nonceTbl, bXor, vNp2)
     LF("  %s=table.concat(%s)", vNonce, nonceTbl)
     LF("  %s=nil;%s=nil;%s=nil", vNp1, vNp2, nonceTbl)
     LF("end")
