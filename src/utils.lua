@@ -14,6 +14,7 @@ local LUA_KEYWORDS = {
     ["or"] = true, ["repeat"] = true, ["return"] = true, ["then"] = true, ["true"] = true,
     ["until"] = true, ["while"] = true,
 }
+local MAX_IDENTIFIER_GENERATION_ATTEMPTS = 1000
 
 --- Generate a random valid Lua identifier using short alphanumeric names.
 --- Example output: "aX", "bY3", "zKm"
@@ -27,8 +28,7 @@ function Utils.rand_name(min_len, max_len)
 
     local alpha = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
     local alnum = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-    local max_attempts = 1000
-    for _ = 1, max_attempts do
+    for _ = 1, MAX_IDENTIFIER_GENERATION_ATTEMPTS do
         local len = math.random(min_len, max_len)
         -- First character must be a letter (valid Lua identifier start)
         local first_idx = math.random(1, #alpha)
