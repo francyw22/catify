@@ -1143,8 +1143,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- decodes them at runtime and executes them via load() so that none of
     -- the check logic (error strings, API names) appears as readable text.
     local at_exec_fmt =
-        "local function %s(_e,_m) local _concat=(table and table.concat) or nil " ..
-        "local _char=(string and string.char) or nil " ..
+        "local function %s(_e,_m) local _concat=(table and table.concat) " ..
+        "local _char=(string and string.char) " ..
         "if type(_concat)~='function' then error('Catify: environment tampered (table.concat)',0) end " ..
         "if type(_char)~='function' then error('Catify: environment tampered (string.char)',0) end " ..
         "if type(%s)~='function' then error('Catify: anti-tamper loader missing',0) end " ..
