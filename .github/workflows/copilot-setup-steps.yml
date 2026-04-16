@@ -35,7 +35,7 @@ jobs:
           if [ -n "${GITHUB_TOKEN:-}" ]; then
             api_headers+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
           fi
-          asset_url="$(curl -fsSL "${api_headers[@]}" "$api_url" | python3 -c '
+          asset_url="$(curl "${api_headers[@]}" -fsSL "$api_url" | python3 -c '
 import json, re, sys
 data = json.load(sys.stdin)
 assets = data.get("assets", [])
