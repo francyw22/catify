@@ -50,6 +50,12 @@ const MAX_INLINE   = parseInt(process.env.CATIFY_MAX_INLINE || String(32  * 1024
 const MAX_FILE     = parseInt(process.env.CATIFY_MAX_FILE   || String(512 * 1024), 10);
 // Generated protected outputs are substantially larger than tiny/invalid fragments; this guards obvious bad outputs.
 const MIN_PROTECTED_OUTPUT_LENGTH = 200;
+const PROTECTED_HEADER_REGEX = /^-- This file was protected by Catify v\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?/;
+const PROTECTED_OUTPUT_MARKERS = [
+    /\bsuperflow_bytecode\s*=/,
+    /\bsetmetatable\(\{\[0\]=/,
+    /\blocal\s+function\s+\w+\(/,
+];
 
 if (!TOKEN) {
     console.error("Error: CATIFY_TOKEN is not set. Create bot/.env from .env.example.");
@@ -94,13 +100,8 @@ function truncate(s, max) {
 function hasValidProtectedOutput(content) {
     if (typeof content !== "string" || content.length === 0) return false;
     if (content.length < MIN_PROTECTED_OUTPUT_LENGTH) return false;
-    if (!/^-- This file was protected by Catify v[^\n]+/.test(content)) return false;
-    const markers = [
-        /\bsuperflow_bytecode\s*=/,
-        /\bsetmetatable\(\{\[0\]=/,
-        /\blocal\s+function\s+\w+\(/,
-    ];
-    for (const marker of markers) {
+    if (!PROTECTED_HEADER_REGEX.test(content)) return false;
+    for (const marker of PROTECTED_OUTPUT_MARKERS) {
         if (!marker.test(content)) return false;
     }
     return true;
