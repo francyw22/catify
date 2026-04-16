@@ -224,17 +224,14 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local eNargs    = vn()
     local eResults  = vn()
     local eFn       = vn()
-    local eOffset   = vn()
     local eNelem    = vn()
     local eSuvs     = vn()
     local eUv       = vn()
     local eSub      = vn()
-    local eState    = vn()   -- dispatch state for CF obfuscation
     local eIdx      = vn()
     local eLim      = vn()
     local eStep     = vn()
     local eI        = vn()
-    local eT        = vn()
     -- anti-tamper names (atPayload is now the fixed string "superflow_bytecode")
     local vStrXor   = vn()   -- string-constant XOR key (second encryption layer)
     -- SHA-256 integrity check variable names
@@ -311,18 +308,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local vDk2 = vn()   -- decoy key fragment 2 (never used for real decryption)
     -- Bitwise compat helpers: use bit32 (Roblox Luau) or native ops loaded via load()
     -- (native ops in load() strings bypass Luau's parser so older Luau versions work too)
-    local bXor = vn()   -- bitwise XOR  (a ~ b)
-    local bNot = vn()   -- bitwise NOT  (~a)
-    local bAnd = vn()   -- bitwise AND  (a & b)
-    local bOr  = vn()   -- bitwise OR   (a | b)
-    local bShl = vn()   -- left shift   (a << b)
-    local bShr = vn()   -- right shift  (a >> b)
-    local b32Bx = vn()  -- obfuscated key: "bxor"
-    local b32Bn = vn()  -- obfuscated key: "bnot"
-    local b32Ba = vn()  -- obfuscated key: "band"
-    local b32Bo = vn()  -- obfuscated key: "bor"
-    local b32Ls = vn()  -- obfuscated key: "lshift"
-    local b32Rs = vn()  -- obfuscated key: "rshift"
+    local bXor, bNot, bAnd, bOr, bShl, bShr = "x", "n", "a", "o", "l", "r"
     local vLoadCompat = vn() -- load/loadstring runtime loader
     local vPack = vn()       -- table.pack compat
     local vUnpack = vn()     -- table.unpack compat
@@ -545,15 +531,15 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Bitwise compat: use bit32 library if available (Roblox Luau), otherwise
     -- compile native Lua 5.3 operators via loader so the Luau parser never sees ~, &, |, <<, >>
     LF("local %s,%s,%s,%s,%s,%s", bXor,bNot,bAnd,bOr,bShl,bShr)
-    LF("local %s,%s,%s,%s,%s,%s=%s,%s,%s,%s,%s,%s", b32Bx,b32Bn,b32Ba,b32Bo,b32Ls,b32Rs,
+    LF("local b,c,d,e,f,g=%s,%s,%s,%s,%s,%s",
        _earlyLitStr("bxor"),_earlyLitStr("bnot"),_earlyLitStr("band"),_earlyLitStr("bor"),_earlyLitStr("lshift"),_earlyLitStr("rshift"))
-    LF("local bit32Available=type(bit32)=='table' and type(bit32[%s])=='function' and type(bit32[%s])=='function' and type(bit32[%s])=='function' and type(bit32[%s])=='function'", b32Bx,b32Bn,b32Ba,b32Bo)
+    LF("local bit32Available=type(bit32)=='table' and type(bit32[b])=='function' and type(bit32[c])=='function' and type(bit32[d])=='function' and type(bit32[e])=='function'")
     LF("if bit32Available then")
-    LF("  %s=bit32[%s];%s=bit32[%s];%s=bit32[%s];%s=bit32[%s]", bXor,b32Bx,bNot,b32Bn,bAnd,b32Ba,bOr,b32Bo)
+    LF("  %s=bit32[b];%s=bit32[c];%s=bit32[d];%s=bit32[e]", bXor,bNot,bAnd,bOr)
     -- bit32.lshift and bit32.rshift may be absent in some Roblox Luau builds.
     -- Fall back to a math-based equivalent using bit32.band (always present).
-    LF("  %s=bit32[%s] or function(a,b) if b>=32 then return 0 end;return bit32[%s](a*(2^b),0xFFFFFFFF) end", bShl,b32Ls,b32Ba)
-    LF("  %s=bit32[%s] or function(a,b) if b>=32 then return 0 end;return math.floor(bit32[%s](a,0xFFFFFFFF)/(2^b)) end", bShr,b32Rs,b32Ba)
+    LF("  %s=bit32[f] or function(a,b) if b>=32 then return 0 end;return bit32[d](a*(2^b),0xFFFFFFFF) end", bShl)
+    LF("  %s=bit32[g] or function(a,b) if b>=32 then return 0 end;return math.floor(bit32[d](a,0xFFFFFFFF)/(2^b)) end", bShr)
     LF("else")
     LF("  if type(%s)~='function' then error('Catify: missing bitwise support',0) end", vLoadCompat)
     LF("  local _f=%s('return function(a,b)return a~b end');if type(_f)~='function' then error('Catify: missing bitwise support',0) end;%s=_f()", vLoadCompat, bXor)
