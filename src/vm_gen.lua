@@ -263,7 +263,9 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local atHashEnc = vn()
     local atHashDec = vn()
     local atHashI = vn()
-    local atDetectFn = vn()
+    local atErrEnc = vn()
+    local atErrDec = vn()
+    local atErrI = vn()
     local atEnvTbl = vn()
     local wmTbl = vn()
     local wmI = vn()
@@ -294,10 +296,12 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local vNp2 = vn()   -- nonce bytes 5-8, pre-XOR'd with nonce mask 2
     local vDk1 = vn()   -- decoy key fragment 1 (never used for real decryption)
     local vDk2 = vn()   -- decoy key fragment 2 (never used for real decryption)
-    -- Bitwise compat helpers: use fully randomised names (plain vn() output) so
-    -- no fixed prefix/suffix pattern (__*_catify) is detectable by static grep.
+    -- Bitwise compat helpers: use randomized helper identifiers so fixed
+    -- helper signatures don't appear in output.
     -- Native ops in load() strings bypass Luau's parser so older Luau versions work too.
-    local bXor, bNot, bAnd, bOr, bShl, bShr = vn(), vn(), vn(), vn(), vn(), vn()
+    local bXor, bNot, bAnd, bOr, bShl, bShr =
+        "__" .. vn() .. "_catify", "__" .. vn() .. "_catify", "__" .. vn() .. "_catify",
+        "__" .. vn() .. "_catify", "__" .. vn() .. "_catify", "__" .. vn() .. "_catify"
     local vLoadCompat = vn() -- load/loadstring runtime loader
     local vPack = vn()       -- table.pack compat
     local vUnpack = vn()     -- table.unpack compat
@@ -1285,89 +1289,35 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         LF("do local %s=%s local %s={} for %s=1,#%s do %s[%s]=string.char(%s(%s:byte(%s),%s)) end %s=table.concat(%s) end",
            atHashEnc, hraw, atHashDec, atHashI, atHashEnc, atHashDec, atHashI, bXor, atHashEnc, atHashI, hmask_expr, atShaExp, atHashDec)
     end
-    LF("local function %s() print('detected by catify :3') return end", atDetectFn)
-    LF("if %s~=%s then %s() return end", atSha, atShaExp, atDetectFn)
+    -- Obfuscate the integrity-check error message so it doesn't appear as plaintext.
+    do
+        local emsg = "[RUNTIME_ERROR] Catify: intg?ity ch4k failed"
+        local emask = math.random(1, 255)
+        local eparts = {}
+        for i = 1, #emsg do eparts[i] = _obfByte(emsg:byte(i) ~ emask) end
+        -- Split into chunks of 60 to stay within Lua's register limit.
+        local echunks = {}
+        for i = 1, #eparts, 60 do
+            local ch = {}
+            for j = i, math.min(i + 59, #eparts) do ch[#ch+1] = eparts[j] end
+            echunks[#echunks+1] = string.format("string.char(%s)", table.concat(ch, ","))
+        end
+        -- The XOR decode is inlined as a function expression; emask is obfuscated.
+        local emask_expr = _obfInt(emask)
+        local eraw = table.concat(echunks, "..")
+        LF("if %s~=%s then local %s=%s local %s={} for %s=1,#%s do %s[%s]=string.char(%s(%s:byte(%s),%s)) end error(table.concat(%s),0) end",
+           atSha, atShaExp, atErrEnc, eraw, atErrDec, atErrI, atErrEnc, atErrDec, atErrI, bXor, atErrEnc, atErrI, emask_expr, atErrDec)
+    end
 
     local env_expr = string.format("((function() local %s=((type(_ENV)=='table' and _ENV) or (type(getfenv)=='function' and getfenv(0)) or (type(_G)=='table' and _G) or {}); return (type(%s)=='table' and %s) or {} end)())", atEnvTbl, atEnvTbl, atEnvTbl)
 
-    -- Minimal anti-tamper surface: verify key runtime primitives for env integrity.
+    -- Minimal anti-tamper surface: only verify delayed callback availability.
     LF("local %s, %s = pcall(function()", atOk, atChkVal)
-    LF("    local _e=%s", env_expr)
-    LF("    local _rg=(type(rawget)=='function' and rawget) or nil")
-    LF("    if type(_rg)~='function' then return false end")
-    LF("    local _task=_rg(_e,'task') or task")
-    LF("    local _dbg=_rg(_e,'debug')")
-    LF("    local _delay=(type(_task)=='table' and _rg(_task,'delay')) or nil")
-    -- string.dump does NOT exist in Luau (Roblox runtime). Do not require it.
-    LF("    local _gi=(type(_dbg)=='table' and _rg(_dbg,'getinfo')) or nil")
-    LF("    if type(_delay)~='function' or type(_gi)~='function' then return false end")
-    -- debug.gethook: detect executor hook injection. Executors typically call debug.sethook
-    -- to intercept every VM function call; gethook() returning non-nil betrays them.
-    LF("    local _gh=(type(_dbg)=='table' and _rg(_dbg,'gethook')) or nil")
-    LF("    if type(_gh)=='function' then local _hfn=_gh() if _hfn~=nil then return false end end")
-    -- Use _rg (rawget) as the probe — it is always a C function present in both Lua 5.3
-    -- and Roblox Luau.  string.dump was previously used here but does not exist in Luau.
-    LF("    local _gi_t=_gi(_rg)")
-    LF("    local _ws=_rg(_e,'workspace')")
-    LF("    local _v3=_rg(_e,'Vector3')")
-    LF("    local _r3=_rg(_e,'Region3')")
-    LF("    local _enum=_rg(_e,'Enum')")
-    LF("    local _terrain=(type(_ws)=='table' or type(_ws)=='userdata') and type(_ws.FindFirstChildOfClass)=='function' and _ws:FindFirstChildOfClass('Terrain') or nil")
-    LF("    local _terrain_ok=true")
-    LF("    if _terrain and type(_terrain.ReadVoxels)=='function' and type(_r3)=='table' and type(_v3)=='table' and type(_enum)=='table' and type(_enum.Material)=='table' then")
-    -- Fixed high-altitude 4x4x4 voxel probe region used as anti-tamper sentinel.
-    LF("      local _vox_ok,_materials=pcall(function()")
-    LF("        local _region=_r3.new(_v3.new(0,900,0),_v3.new(4,904,4))")
-    LF("        local _mats=_terrain:ReadVoxels(_region,4)")
-    LF("        return _mats")
-    LF("      end)")
-    LF("      if not _vox_ok or type(_materials)~='table' then _terrain_ok=false else")
-    LF("        local _all_air=true")
-    LF("        for _,_layer in ipairs(_materials) do")
-    LF("          if not _all_air then break end")
-    LF("          for _,_row in ipairs(_layer) do")
-    LF("            if not _all_air then break end")
-    LF("            for _,_mat in ipairs(_row) do")
-    LF("              if _mat~=_enum.Material.Air then _all_air=false break end")
-    LF("            end")
-    LF("          end")
-    LF("        end")
-    LF("        _terrain_ok=_all_air")
-    LF("      end")
-    LF("    end")
-    -- _sha_ok: known-answer test (KAT) — verify shaFn actually computes the correct hash
-    -- on a random input generated at obfuscation time, not just that it's a function.
-    -- Both utils.sha256 (generator-side, Lua 5.3) and the emitted shaFn (runtime, Luau/5.3)
-    -- implement the same standard SHA-256 algorithm from the same source; their outputs are
-    -- identical for any input.  A mismatch at runtime therefore means shaFn was patched or
-    -- replaced by an executor — which is exactly the tamper condition we want to detect.
-    do
-        -- 4–8 bytes: enough entropy that a brute-forced pre-image is impractical, yet short
-        -- enough to keep the embedded literal compact in the generated output.
-        local kat_len = math.random(4, 8)
-        local kat_raw = {}
-        for i = 1, kat_len do kat_raw[i] = math.random(0, 255) end
-        local kat_str_g = string.char(table.unpack(kat_raw))
-        local kat_sha_g = utils.sha256(kat_str_g)
-        local kat_imask = math.random(1, 255)
-        local kat_hmask = math.random(1, 255)
-        local kat_iparts = {}
-        for i = 1, kat_len do kat_iparts[i] = _obfByte(kat_raw[i] ~ kat_imask) end
-        local kat_hparts = {}
-        for i = 1, 32 do kat_hparts[i] = _obfByte(kat_sha_g:byte(i) ~ kat_hmask) end
-        LF("    local _kat_im=%s local _kat_hm=%s", _obfInt(kat_imask), _obfInt(kat_hmask))
-        LF("    local _kat_id={%s}", table.concat(kat_iparts, ","))
-        LF("    local _kat_hd={%s}", table.concat(kat_hparts, ","))
-        LF("    local _kat_is=(function()local _t={}for _i=1,#_kat_id do _t[_i]=string.char(%s(_kat_id[_i],_kat_im))end;return table.concat(_t)end)()", bXor)
-        LF("    local _kat_hs=(function()local _t={}for _i=1,#_kat_hd do _t[_i]=string.char(%s(_kat_hd[_i],_kat_hm))end;return table.concat(_t)end)()", bXor)
-        LF("    local _sha_ok=type(%s)=='function' and %s(_kat_is)==_kat_hs", shaFn, shaFn)
-    end
-    LF("    local _aes_ok=(type(%s)=='function')", vDecrypt)
-    LF("    return type(_gi_t)=='table' and _gi_t.what~=nil and _sha_ok and _aes_ok and _terrain_ok")
+    LF("    return typeof(task) == %s and typeof(task.delay) == %s", _obfLitStr("table"), _obfLitStr("function"))
     LF("end)")
     LF("local %s = not (%s and %s)", atTrig, atOk, atChkVal)
     LF("if %s then", atTrig)
-    LF("    %s()", atDetectFn)
+    LF("    print('Detected by catify :3')")
     LF("    return")
     LF("end")
 

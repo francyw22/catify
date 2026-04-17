@@ -115,21 +115,9 @@ local function info(fmt, ...)
     io.stderr:write(string.format("[Catify] " .. fmt .. "\n", ...))
 end
 
-local function ensure_lua53_runtime()
-    local v = tostring(_VERSION or "")
-    if not v:match("^Lua 5%.3") then
-        io.stderr:write(string.format(
-            "[Catify] Unsupported Lua runtime: %s\n[Catify] Catify currently requires Lua 5.3 bytecode. Run with `lua5.3 catify.lua ...`.\n",
-            v ~= "" and v or "unknown"
-        ))
-        os.exit(1)
-    end
-end
-
 -- ─── Main ─────────────────────────────────────────────────────────────────────
 local function main(argv)
     io.stderr:write(BANNER .. "\n")
-    ensure_lua53_runtime()
 
     local ok, opts_or_err = pcall(parse_args, argv)
     if not ok then
@@ -235,7 +223,7 @@ local function main(argv)
     local output_size   = #result_code
     info("Done!  %d → %d bytes  (%.1fx)",
          original_size, output_size, output_size / math.max(1, original_size))
-    info("Protected with: opcode shuffle, AES-256-CTR encryption, SHA-256 integrity, debug strip, junk injection (intensity %d), VM dispatch obfuscation, stealth anti-tamper (21 checks)", opts.intensity)
+    info("Protected with: opcode shuffle, AES-256-CTR encryption, SHA-256 integrity, debug strip, junk injection (intensity %d), VM dispatch obfuscation, stealth anti-tamper (20 checks)", opts.intensity)
 end
 
 main(arg)

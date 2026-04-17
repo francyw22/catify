@@ -212,13 +212,7 @@ function Parser.parse(bytecode)
     local sig = bytecode:sub(1, 4)
     assert(sig == "\27Lua", "Invalid Lua signature")
     local ver = bytecode:byte(5)
-    assert(
-        ver == 0x53,
-        string.format(
-            "Unsupported Lua bytecode version 0x%02X (need 0x53 / Lua 5.3). Run Catify with lua5.3.",
-            ver
-        )
-    )
+    assert(ver == 0x53, string.format("Unsupported Lua version 0x%02X (need 0x53)", ver))
     r.pos = 7   -- skip: sig(4) + version(1) + format(1)
 
     -- LUAC_DATA (6 bytes): "\x19\x93\r\n\x1a\n"
