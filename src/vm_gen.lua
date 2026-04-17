@@ -1296,17 +1296,18 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("    local _rg=(type(rawget)=='function' and rawget) or nil")
     LF("    if type(_rg)~='function' then return false end")
     LF("    local _task=_rg(_e,'task') or task")
-    LF("    local _str=_rg(_e,'string') or string")
     LF("    local _dbg=_rg(_e,'debug')")
     LF("    local _delay=(type(_task)=='table' and _rg(_task,'delay')) or nil")
-    LF("    local _dump=(type(_str)=='table' and _rg(_str,'dump')) or nil")
+    -- string.dump does NOT exist in Luau (Roblox runtime). Do not require it.
     LF("    local _gi=(type(_dbg)=='table' and _rg(_dbg,'getinfo')) or nil")
-    LF("    if type(_delay)~='function' or type(_dump)~='function' or type(_gi)~='function' then return false end")
+    LF("    if type(_delay)~='function' or type(_gi)~='function' then return false end")
     -- debug.gethook: detect executor hook injection. Executors typically call debug.sethook
     -- to intercept every VM function call; gethook() returning non-nil betrays them.
     LF("    local _gh=(type(_dbg)=='table' and _rg(_dbg,'gethook')) or nil")
     LF("    if type(_gh)=='function' then local _hfn=_gh() if _hfn~=nil then return false end end")
-    LF("    local _gi_t=_gi(_dump)")
+    -- Use _rg (rawget) as the probe — it is always a C function present in both Lua 5.3
+    -- and Roblox Luau.  string.dump was previously used here but does not exist in Luau.
+    LF("    local _gi_t=_gi(_rg)")
     LF("    local _ws=_rg(_e,'workspace')")
     LF("    local _v3=_rg(_e,'Vector3')")
     LF("    local _r3=_rg(_e,'Region3')")
@@ -1341,6 +1342,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- identical for any input.  A mismatch at runtime therefore means shaFn was patched or
     -- replaced by an executor — which is exactly the tamper condition we want to detect.
     do
+        -- 4–8 bytes: enough entropy that a brute-forced pre-image is impractical, yet short
+        -- enough to keep the embedded literal compact in the generated output.
         local kat_len = math.random(4, 8)
         local kat_raw = {}
         for i = 1, kat_len do kat_raw[i] = math.random(0, 255) end
