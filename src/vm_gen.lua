@@ -295,7 +295,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local vDk1 = vn()   -- decoy key fragment 1 (never used for real decryption)
     local vDk2 = vn()   -- decoy key fragment 2 (never used for real decryption)
     -- Bitwise compat helpers: use fully randomised names (plain vn() output) so
-    -- no fixed prefix/suffix pattern (__*_catify) is detectable by static grep.
+    -- no fixed signature pattern is detectable by static grep.
     -- Native ops in load() strings bypass Luau's parser so older Luau versions work too.
     local bXor, bNot, bAnd, bOr, bShl, bShr = vn(), vn(), vn(), vn(), vn(), vn()
     local vLoadCompat = vn() -- load/loadstring runtime loader
@@ -405,6 +405,19 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local fwdmap = {}
     for shuffled = 0, 46 do
         fwdmap[revmap[shuffled] or shuffled] = shuffled
+    end
+    -- ── 4b. Obfuscated dispatch-slot transform (bijective on 6-bit opcode IDs) ──
+    -- Handlers are not stored directly at shuffled opcode indexes; each opcode is
+    -- mapped through a per-build affine/XOR transform before table lookup.
+    local dispatchMul = math.random(0, 31) * 2 + 1 -- odd => invertible mod 64
+    local dispatchAdd = math.random(0, 63)
+    local dispatchXor = math.random(1, 63)
+    local function dispatch_slot(op)
+        return ((((op * dispatchMul) + dispatchAdd) % 64) ~ dispatchXor) & 0x3F
+    end
+    local dispatchSlot = {}
+    for real = 0, 46 do
+        dispatchSlot[real] = dispatch_slot(fwdmap[real])
     end
 
     -- ── 4. Junk-code snippets (opaque predicates, dead branches) ─────────────
@@ -930,94 +943,94 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
 
     -- [0] MOVE
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s[%s].v end",
-       vDispatch, fwdmap[0], eA,eB,eC,eBx,eSBx, eRegs,eA, eRegs,eB)
+       vDispatch, dispatchSlot[0], eA,eB,eC,eBx,eSBx, eRegs,eA, eRegs,eB)
     -- [1] LOADK
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s[%s] end",
-       vDispatch, fwdmap[1], eA,eB,eC,eBx,eSBx, eRegs,eA, eKst,eBx)
+       vDispatch, dispatchSlot[1], eA,eB,eC,eBx,eSBx, eRegs,eA, eKst,eBx)
     -- [2] LOADKX  (next instruction is EXTRAARG carrying the index)
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, fwdmap[2], eA,eB,eC,eBx,eSBx)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, dispatchSlot[2], eA,eB,eC,eBx,eSBx)
     LF("    local _ni=%s[%s];%s=%s+1;%s[%s].v=%s[%s(_ni,6)]", eCode,ePc,ePc,ePc, eRegs,eA,eKst,bShr)
     LF("  end")
     -- [3] LOADBOOL
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=(%s~=0);if %s~=0 then %s=%s+1 end end",
-       vDispatch, fwdmap[3], eA,eB,eC,eBx,eSBx, eRegs,eA,eB, eC,ePc,ePc)
+       vDispatch, dispatchSlot[3], eA,eB,eC,eBx,eSBx, eRegs,eA,eB, eC,ePc,ePc)
     -- [4] LOADNIL
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) for _i=%s,%s+%s do %s[_i].v=nil end end",
-       vDispatch, fwdmap[4], eA,eB,eC,eBx,eSBx, eA,eA,eB, eRegs)
+       vDispatch, dispatchSlot[4], eA,eB,eC,eBx,eSBx, eA,eA,eB, eRegs)
     src[#src+1] = junk_block("  ", 1)   -- junk between handler groups
     -- [5] GETUPVAL (defensive: nil upval box → nil)
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) local _u=%s[%s];%s[%s].v=_u and _u.v or nil end",
-       vDispatch, fwdmap[5], eA,eB,eC,eBx,eSBx, eUpvals,eB, eRegs,eA)
+       vDispatch, dispatchSlot[5], eA,eB,eC,eBx,eSBx, eUpvals,eB, eRegs,eA)
     -- [6] GETTABUP (defensive: missing upval box → nil; present box → normal indexing)
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) local _u=%s[%s];%s[%s].v=_u and _u.v[%s(%s)] end",
-       vDispatch, fwdmap[6], eA,eB,eC,eBx,eSBx, eUpvals,eB, eRegs,eA, eRk,eC)
+       vDispatch, dispatchSlot[6], eA,eB,eC,eBx,eSBx, eUpvals,eB, eRegs,eA, eRk,eC)
     -- [7] GETTABLE
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s[%s].v[%s(%s)] end",
-       vDispatch, fwdmap[7], eA,eB,eC,eBx,eSBx, eRegs,eA, eRegs,eB, eRk,eC)
+       vDispatch, dispatchSlot[7], eA,eB,eC,eBx,eSBx, eRegs,eA, eRegs,eB, eRk,eC)
     -- [8] SETTABUP (defensive: missing upval box → no-op; present box → normal indexing)
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) local _u=%s[%s];if _u then _u.v[%s(%s)]=%s(%s) end end",
-       vDispatch, fwdmap[8], eA,eB,eC,eBx,eSBx, eUpvals,eA, eRk,eB, eRk,eC)
+       vDispatch, dispatchSlot[8], eA,eB,eC,eBx,eSBx, eUpvals,eA, eRk,eB, eRk,eC)
     -- [9] SETUPVAL
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s[%s].v end",
-       vDispatch, fwdmap[9], eA,eB,eC,eBx,eSBx, eUpvals,eB, eRegs,eA)
+       vDispatch, dispatchSlot[9], eA,eB,eC,eBx,eSBx, eUpvals,eB, eRegs,eA)
     -- [10] SETTABLE
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v[%s(%s)]=%s(%s) end",
-       vDispatch, fwdmap[10], eA,eB,eC,eBx,eSBx, eRegs,eA, eRk,eB, eRk,eC)
+       vDispatch, dispatchSlot[10], eA,eB,eC,eBx,eSBx, eRegs,eA, eRk,eB, eRk,eC)
     src[#src+1] = junk_block("  ", 1)
     -- [11] NEWTABLE
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v={} end",
-       vDispatch, fwdmap[11], eA,eB,eC,eBx,eSBx, eRegs,eA)
+       vDispatch, dispatchSlot[11], eA,eB,eC,eBx,eSBx, eRegs,eA)
     -- [12] SELF
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s+1].v=%s[%s].v;%s[%s].v=%s[%s].v[%s(%s)] end",
-       vDispatch, fwdmap[12], eA,eB,eC,eBx,eSBx, eRegs,eA, eRegs,eB, eRegs,eA, eRegs,eB, eRk,eC)
+       vDispatch, dispatchSlot[12], eA,eB,eC,eBx,eSBx, eRegs,eA, eRegs,eB, eRegs,eA, eRegs,eB, eRk,eC)
     -- [13..19] Arithmetic: ADD SUB MUL MOD POW DIV IDIV
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)+%s(%s) end", vDispatch,fwdmap[13],eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)-%s(%s) end", vDispatch,fwdmap[14],eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)*%s(%s) end", vDispatch,fwdmap[15],eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)%%%s(%s) end",vDispatch,fwdmap[16],eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)^%s(%s) end", vDispatch,fwdmap[17],eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)/%s(%s) end", vDispatch,fwdmap[18],eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)//%s(%s) end",vDispatch,fwdmap[19],eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)+%s(%s) end", vDispatch,dispatchSlot[13],eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)-%s(%s) end", vDispatch,dispatchSlot[14],eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)*%s(%s) end", vDispatch,dispatchSlot[15],eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)%%%s(%s) end",vDispatch,dispatchSlot[16],eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)^%s(%s) end", vDispatch,dispatchSlot[17],eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)/%s(%s) end", vDispatch,dispatchSlot[18],eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s)//%s(%s) end",vDispatch,dispatchSlot[19],eA,eB,eC,eBx,eSBx, eRegs,eA,eRk,eB,eRk,eC)
     src[#src+1] = junk_block("  ", 1)
     -- [20..24] Bitwise: BAND BOR BXOR SHL SHR
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s(%s),%s(%s)) end",  vDispatch,fwdmap[20],eA,eB,eC,eBx,eSBx, eRegs,eA,bAnd,eRk,eB,eRk,eC)
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s(%s),%s(%s)) end",  vDispatch,fwdmap[21],eA,eB,eC,eBx,eSBx, eRegs,eA,bOr, eRk,eB,eRk,eC)
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s(%s),%s(%s)) end",  vDispatch,fwdmap[22],eA,eB,eC,eBx,eSBx, eRegs,eA,bXor,eRk,eB,eRk,eC)
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s(%s),%s(%s)) end",  vDispatch,fwdmap[23],eA,eB,eC,eBx,eSBx, eRegs,eA,bShl,eRk,eB,eRk,eC)
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s(%s),%s(%s)) end",  vDispatch,fwdmap[24],eA,eB,eC,eBx,eSBx, eRegs,eA,bShr,eRk,eB,eRk,eC)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s(%s),%s(%s)) end",  vDispatch,dispatchSlot[20],eA,eB,eC,eBx,eSBx, eRegs,eA,bAnd,eRk,eB,eRk,eC)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s(%s),%s(%s)) end",  vDispatch,dispatchSlot[21],eA,eB,eC,eBx,eSBx, eRegs,eA,bOr, eRk,eB,eRk,eC)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s(%s),%s(%s)) end",  vDispatch,dispatchSlot[22],eA,eB,eC,eBx,eSBx, eRegs,eA,bXor,eRk,eB,eRk,eC)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s(%s),%s(%s)) end",  vDispatch,dispatchSlot[23],eA,eB,eC,eBx,eSBx, eRegs,eA,bShl,eRk,eB,eRk,eC)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s(%s),%s(%s)) end",  vDispatch,dispatchSlot[24],eA,eB,eC,eBx,eSBx, eRegs,eA,bShr,eRk,eB,eRk,eC)
     -- [25..28] Unary: UNM BNOT NOT LEN
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=-%s[%s].v end",          vDispatch,fwdmap[25],eA,eB,eC,eBx,eSBx, eRegs,eA,eRegs,eB)
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s[%s].v) end",       vDispatch,fwdmap[26],eA,eB,eC,eBx,eSBx, eRegs,eA,bNot,eRegs,eB)
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=not %s[%s].v end",  vDispatch,fwdmap[27],eA,eB,eC,eBx,eSBx, eRegs,eA,eRegs,eB)
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=#%s[%s].v end",     vDispatch,fwdmap[28],eA,eB,eC,eBx,eSBx, eRegs,eA,eRegs,eB)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=-%s[%s].v end",          vDispatch,dispatchSlot[25],eA,eB,eC,eBx,eSBx, eRegs,eA,eRegs,eB)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s(%s[%s].v) end",       vDispatch,dispatchSlot[26],eA,eB,eC,eBx,eSBx, eRegs,eA,bNot,eRegs,eB)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=not %s[%s].v end",  vDispatch,dispatchSlot[27],eA,eB,eC,eBx,eSBx, eRegs,eA,eRegs,eB)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=#%s[%s].v end",     vDispatch,dispatchSlot[28],eA,eB,eC,eBx,eSBx, eRegs,eA,eRegs,eB)
     src[#src+1] = junk_block("  ", 1)
     -- [29] CONCAT
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, fwdmap[29], eA,eB,eC,eBx,eSBx)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, dispatchSlot[29], eA,eB,eC,eBx,eSBx)
     LF("    local _t={}")
     LF("    for _i=%s,%s do _t[#_t+1]=tostring(%s[_i].v) end", eB,eC,eRegs)
     LF("    %s[%s].v=table.concat(_t)", eRegs,eA)
     LF("  end")
     -- [30] JMP  (modifies pc via upvalue – Lua closure upvalue sharing)
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s=%s+%s end",
-       vDispatch, fwdmap[30], eA,eB,eC,eBx,eSBx, ePc,ePc,eSBx)
+       vDispatch, dispatchSlot[30], eA,eB,eC,eBx,eSBx, ePc,ePc,eSBx)
     -- [31..33] Comparisons: EQ LT LE
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) if(%s(%s)==%s(%s))~=(%s~=0) then %s=%s+1 end end",
-       vDispatch, fwdmap[31], eA,eB,eC,eBx,eSBx, eRk,eB,eRk,eC,eA,ePc,ePc)
+       vDispatch, dispatchSlot[31], eA,eB,eC,eBx,eSBx, eRk,eB,eRk,eC,eA,ePc,ePc)
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) if(%s(%s)<%s(%s))~=(%s~=0) then %s=%s+1 end end",
-       vDispatch, fwdmap[32], eA,eB,eC,eBx,eSBx, eRk,eB,eRk,eC,eA,ePc,ePc)
+       vDispatch, dispatchSlot[32], eA,eB,eC,eBx,eSBx, eRk,eB,eRk,eC,eA,ePc,ePc)
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) if(%s(%s)<=%s(%s))~=(%s~=0) then %s=%s+1 end end",
-       vDispatch, fwdmap[33], eA,eB,eC,eBx,eSBx, eRk,eB,eRk,eC,eA,ePc,ePc)
+       vDispatch, dispatchSlot[33], eA,eB,eC,eBx,eSBx, eRk,eB,eRk,eC,eA,ePc,ePc)
     -- [34] TEST
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) if(not not %s[%s].v)~=(%s~=0) then %s=%s+1 end end",
-       vDispatch, fwdmap[34], eA,eB,eC,eBx,eSBx, eRegs,eA,eC,ePc,ePc)
+       vDispatch, dispatchSlot[34], eA,eB,eC,eBx,eSBx, eRegs,eA,eC,ePc,ePc)
     -- [35] TESTSET
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, fwdmap[35], eA,eB,eC,eBx,eSBx)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, dispatchSlot[35], eA,eB,eC,eBx,eSBx)
     LF("    if(not not %s[%s].v)==(%s~=0) then %s[%s].v=%s[%s].v else %s=%s+1 end",
        eRegs,eB,eC, eRegs,eA,eRegs,eB, ePc,ePc)
     LF("  end")
     src[#src+1] = junk_block("  ", 1)
     -- [36] CALL
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, fwdmap[36], eA,eB,eC,eBx,eSBx)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, dispatchSlot[36], eA,eB,eC,eBx,eSBx)
     LF("    local %s=%s[%s].v", eFn,eRegs,eA)
     LF("    local %s={}", eCallArgs)
     LF("    local %s=%s==0 and %s-%s or %s-1", eNargs,eB,eTop,eA,eB)
@@ -1033,7 +1046,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("    end")
     LF("  end")
     -- [37] TAILCALL (simulated as call + done; avoids TCO loss of semantics)
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, fwdmap[37], eA,eB,eC,eBx,eSBx)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, dispatchSlot[37], eA,eB,eC,eBx,eSBx)
     LF("    local %s=%s[%s].v", eFn,eRegs,eA)
     LF("    local %s={}", eCallArgs)
     LF("    local %s=%s==0 and %s-%s or %s-1", eNargs,eB,eTop,eA,eB)
@@ -1043,7 +1056,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("    for _i=1,%s do %s[_i]=%s[_i] end", eRetN,eRetVals,eResults)
     LF("  end")
     -- [38] RETURN
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, fwdmap[38], eA,eB,eC,eBx,eSBx)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, dispatchSlot[38], eA,eB,eC,eBx,eSBx)
     LF("    %s=true", eDone)
     LF("    if %s==1 then %s=0;return end", eB,eRetN)
     LF("    local %s=%s==0 and %s or %s+%s-2", eNelem,eB,eTop,eA,eB)
@@ -1052,7 +1065,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("  end")
     src[#src+1] = junk_block("  ", 1)
     -- [39] FORLOOP
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, fwdmap[39], eA,eB,eC,eBx,eSBx)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, dispatchSlot[39], eA,eB,eC,eBx,eSBx)
     LF("    %s[%s].v=%s[%s].v+%s[%s+2].v", eRegs,eA,eRegs,eA,eRegs,eA)
     LF("    local %s=%s[%s].v;local %s=%s[%s+1].v;local %s=%s[%s+2].v",
        eIdx,eRegs,eA, eLim,eRegs,eA, eStep,eRegs,eA)
@@ -1061,16 +1074,16 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("  end")
     -- [40] FORPREP
     LF("  %s[%d]=function(%s,%s,%s,%s,%s) %s[%s].v=%s[%s].v-%s[%s+2].v;%s=%s+%s end",
-       vDispatch, fwdmap[40], eA,eB,eC,eBx,eSBx, eRegs,eA,eRegs,eA,eRegs,eA, ePc,ePc,eSBx)
+       vDispatch, dispatchSlot[40], eA,eB,eC,eBx,eSBx, eRegs,eA,eRegs,eA,eRegs,eA, ePc,ePc,eSBx)
     -- [41] TFORCALL
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, fwdmap[41], eA,eB,eC,eBx,eSBx)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, dispatchSlot[41], eA,eB,eC,eBx,eSBx)
     LF("    local %s=%s(%s[%s].v(%s[%s+1].v,%s[%s+2].v))",
        eResults,vPack,eRegs,eA,eRegs,eA,eRegs,eA)
     LF("    for _i=1,%s do if not %s[%s+2+_i] then %s[%s+2+_i]={} end;%s[%s+2+_i].v=%s[_i] end",
        eC,eRegs,eA,eRegs,eA,eRegs,eA,eResults)
     LF("  end")
     -- [42] TFORLOOP
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s)",vDispatch,fwdmap[42],eA,eB,eC,eBx,eSBx)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s)",vDispatch,dispatchSlot[42],eA,eB,eC,eBx,eSBx)
     LF("    if %s[%s+1].v~=nil then %s[%s].v=%s[%s+1].v;%s=%s+%s end",
        eRegs,eA, eRegs,eA,eRegs,eA, ePc,ePc,eSBx)
     LF("  end")
@@ -1081,7 +1094,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Offset is (block_number - 1) * SETLIST_BATCH, consistent with the C!=0
     -- path: (C-1)*SETLIST_BATCH.
     local SETLIST_BATCH = 50
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, fwdmap[43], eA,eB,eC,eBx,eSBx)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, dispatchSlot[43], eA,eB,eC,eBx,eSBx)
     LF("    local _off")
     LF("    if %s==0 then local _ni=%s[%s];%s=%s+1;_off=(%s(_ni,6)-1)*%d else _off=(%s-1)*%d end",
        eC,eCode,ePc,ePc,ePc,bShr,SETLIST_BATCH,eC,SETLIST_BATCH)
@@ -1090,7 +1103,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("  end")
     -- [44] CLOSURE: captures suvs+proto-index via local aliases (safe even
     --              when eI is reused as a loop counter elsewhere)
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, fwdmap[44], eA,eB,eC,eBx,eSBx)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, dispatchSlot[44], eA,eB,eC,eBx,eSBx)
     LF("    local %s=%s[%s]", eSub,eProtos,eBx)
     LF("    local %s={}", eSuvs)
     LF("    for _i=0,%s.sizeupvalues-1 do", eSub)
@@ -1102,7 +1115,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("    %s[%s].v=function(...) return %s(%s[_cbx],_csuvs,...) end", eRegs,eA,vExec,eProtos)
     LF("  end")
     -- [45] VARARG
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, fwdmap[45], eA,eB,eC,eBx,eSBx)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s)", vDispatch, dispatchSlot[45], eA,eB,eC,eBx,eSBx)
     LF("    if %s==0 then", eB)
     LF("      for _i=0,#%s-1 do if not %s[%s+_i] then %s[%s+_i]={} end;%s[%s+_i].v=%s[_i+1] end",
        eVararg,eRegs,eA,eRegs,eA,eRegs,eA,eVararg)
@@ -1113,7 +1126,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("    end")
     LF("  end")
     -- [46] EXTRAARG  (consumed by LOADKX/SETLIST; treated as no-op if reached alone)
-    LF("  %s[%d]=function(%s,%s,%s,%s,%s) end", vDispatch, fwdmap[46], eA,eB,eC,eBx,eSBx)
+    LF("  %s[%d]=function(%s,%s,%s,%s,%s) end", vDispatch, dispatchSlot[46], eA,eB,eC,eBx,eSBx)
 
     src[#src+1] = junk_block("  ", math.random(1, 2))
 
@@ -1130,9 +1143,12 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local eMask63  = vn(); local eMask255 = vn(); local eMask511 = vn()
     local eMask18  = vn(); local eBias    = vn()
     local eSh6     = vn(); local eSh14   = vn(); local eSh23 = vn()
+    local eDispMul = vn(); local eDispAdd = vn(); local eDispXor = vn()
+    local eOpSlot = vn(); local eOpSeed = vn()
     LF("  local %s=%s local %s=%s local %s=%s", eMask63,_m63, eMask255,_m255, eMask511,_m511)
     LF("  local %s=%s local %s=%s", eMask18,_m18, eBias,_bias)
     LF("  local %s=%s local %s=%s local %s=%s", eSh6,_sh6, eSh14,_sh14, eSh23,_sh23)
+    LF("  local %s=%s local %s=%s local %s=%s", eDispMul,_obfInt(dispatchMul), eDispAdd,_obfInt(dispatchAdd), eDispXor,_obfInt(dispatchXor))
 
     -- ── Main fetch-decode-dispatch loop ──────────────────────────────────────
     LF("  while not %s do", eDone)
@@ -1144,7 +1160,9 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("    local %s=%s(%s(%s,%s),%s)",   eC,  bAnd,bShr,eInst,eSh14,eMask511)
     LF("    local %s=%s(%s(%s,%s),%s)",   eBx, bAnd,bShr,eInst,eSh14,eMask18)
     LF("    local %s=%s-%s",         eSBx,eBx,eBias)
-    LF("    local %s=%s[%s]", "_dh_", vDispatch,eOp)
+    LF("    local %s=%s(%s*%s+%s,%s)", eOpSeed,bAnd,eOp,eDispMul,eDispAdd,eMask63)
+    LF("    local %s=%s(%s,%s)", eOpSlot,bXor,eOpSeed,eDispXor)
+    LF("    local %s=%s[%s]", "_dh_", vDispatch,eOpSlot)
     LF("    if %s then %s(%s,%s,%s,%s,%s) else error('Catify: unknown opcode '..tostring(%s),0) end", "_dh_","_dh_",eA,eB,eC,eBx,eSBx,eOp)
     LF("  end")
     LF("  return %s(%s,1,%s)", vUnpack,eRetVals,eRetN)
