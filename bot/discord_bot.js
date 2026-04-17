@@ -7,7 +7,7 @@
       • Node.js >= 18
       • discord.js  (npm install)
       • dotenv      (npm install)
-      • Lua 5.3 runtime in PATH (`lua5.3`, `lua53`, or configured via CATIFY_LUA_BIN)
+      • lua 5.3+ in PATH
 
     Quick start:
       1.  Copy bot/.env.example → bot/.env and fill in your token.
@@ -48,9 +48,6 @@ const PREFIX       = process.env.CATIFY_PREFIX || "!";
 const PASSES       = Math.max(1, Math.min(2, parseInt(process.env.CATIFY_PASSES  || "1", 10)));
 const MAX_INLINE   = parseInt(process.env.CATIFY_MAX_INLINE || String(32  * 1024), 10);
 const MAX_FILE     = parseInt(process.env.CATIFY_MAX_FILE   || String(512 * 1024), 10);
-const LUA_BIN      = (process.env.CATIFY_LUA_BIN || "").trim();
-const DEBUG_RUNTIME_DETECTION = process.env.CATIFY_DEBUG_RUNTIME === "1";
-const LUA_VERSION_CHECK_TIMEOUT_MS = 5000;
 // Generated protected outputs are substantially larger than tiny/invalid fragments; this guards obvious bad outputs.
 const MIN_PROTECTED_OUTPUT_LENGTH = 200;
 const PROTECTED_HEADER_REGEX = /^-- This file was protected by Catify v\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?/;
@@ -68,8 +65,6 @@ if (!TOKEN) {
 // Resolve the catify CLI entry point (one directory up from bot/)
 const CATIFY_CLI = path.resolve(__dirname, "..", "catify.lua");
 const ALLOWED_ATTACHMENT_EXTENSIONS = new Set([".lua", ".txt"]);
-const LUA_BIN_CANDIDATES = LUA_BIN ? [LUA_BIN] : ["lua5.3", "lua53", "lua"];
-let lua53RuntimePromise = null;
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -95,85 +90,6 @@ function stripCodeFence(text) {
 function truncate(s, max) {
     if (s.length <= max) return s;
     return s.slice(0, max - 3) + "...";
-}
-
-/**
- * Produce a user-safe obfuscation error string with script-focused details only.
- * @param {unknown} err
- * @returns {string}
- */
-function formatObfuscationError(err) {
-    const raw = String((err && (err.stderr || err.message)) || "").replace(/\r/g, "");
-    if (/\[Catify\]\s*Unsupported Lua runtime/i.test(raw)) {
-        return "❌ Catify bot config error: Lua 5.3 is required on the bot host. " +
-            "Install/use 'lua5.3' or set 'CATIFY_LUA_BIN' to a Lua 5.3 executable.";
-    }
-    if ((err && err.code) === "CATIFY_LUA53_NOT_FOUND") {
-        return "❌ Catify bot config error: Lua 5.3 runtime was not found. " +
-            "Install Lua 5.3 and/or set 'CATIFY_LUA_BIN' in bot/.env.";
-    }
-    if ((err && err.code) === "CATIFY_LUA_BIN_INVALID") {
-        return "❌ Catify bot config error: CATIFY_LUA_BIN contains invalid characters. " +
-            "Use only an executable name (no spaces, paths, or arguments).";
-    }
-    const lines = raw.split("\n").map((s) => s.trim()).filter(Boolean);
-    const catifyLine = lines.find((line) =>
-        /\[Catify\]\s*(Syntax error|Parser error|Re-compile error|Re-parse error)/i.test(line)
-    );
-    const detail = (catifyLine || lines[lines.length - 1] || "unknown error")
-        .replace(/^\[Catify\]\s*/i, "");
-    return "error while obfuscating. due to the error in your script:\n```\n" +
-        truncate(detail, 1800) +
-        "\n```";
-}
-
-/**
- * Resolve a Lua 5.3 executable from configured/default candidates.
- * @returns {Promise<string>}
- */
-async function resolveLua53Runtime() {
-    if (LUA_BIN && !isValidLuaBin(LUA_BIN)) {
-        const err = new Error("Invalid CATIFY_LUA_BIN value");
-        err.code = "CATIFY_LUA_BIN_INVALID";
-        throw err;
-    }
-    for (const bin of LUA_BIN_CANDIDATES) {
-        try {
-            const { stdout } = await execFileAsync(bin, ["-e", "io.write(_VERSION or '')"], {
-                timeout: LUA_VERSION_CHECK_TIMEOUT_MS,
-            });
-            const versionLine = String(stdout || "").trim();
-            if (/^Lua\s+5\.3\b/i.test(versionLine)) {
-                return bin;
-            }
-        } catch (_) {
-            if (DEBUG_RUNTIME_DETECTION) {
-                console.warn(`[Catify Bot] Lua runtime candidate failed: ${bin}`);
-            }
-            // Try next candidate.
-        }
-    }
-    const err = new Error("Lua 5.3 runtime not found");
-    err.code = "CATIFY_LUA53_NOT_FOUND";
-    throw err;
-}
-
-function getLua53Runtime() {
-    if (!lua53RuntimePromise) lua53RuntimePromise = resolveLua53Runtime();
-    return lua53RuntimePromise;
-}
-
-function isValidLuaBin(value) {
-    if (!value || hasUnsafeLuaBinChars(value)) return false;
-    return isExecutableName(value);
-}
-
-function hasUnsafeLuaBinChars(value) {
-    return /\s/.test(value) || value.startsWith("-") || /[\\/]/.test(value);
-}
-
-function isExecutableName(value) {
-    return /^[A-Za-z0-9_.-]+$/.test(value);
 }
 
 /**
@@ -238,9 +154,8 @@ async function obfuscate(source, passes) {
 
     try {
         fs.writeFileSync(inFile, source, "utf8");
-        const luaRuntime = await getLua53Runtime();
 
-        await execFileAsync(luaRuntime, [
+        await execFileAsync("lua", [
             CATIFY_CLI,
             inFile,
             outFile,
@@ -332,7 +247,9 @@ client.on("messageCreate", async (message) => {
         try {
             result = await obfuscate(source, PASSES);
         } catch (err) {
-            await message.reply(formatObfuscationError(err));
+            await message.reply(
+                "❌ Obfuscation failed:\n```\n" + truncate(String(err.stderr || err.message), 1800) + "\n```"
+            );
             return;
         }
         if (!hasValidProtectedOutput(result)) {
@@ -370,7 +287,9 @@ client.on("messageCreate", async (message) => {
     try {
         result = await obfuscate(source, PASSES);
     } catch (err) {
-        await message.reply(formatObfuscationError(err));
+        await message.reply(
+            "❌ Obfuscation failed:\n```\n" + truncate(String(err.stderr || err.message), 1800) + "\n```"
+        );
         return;
     }
     if (!hasValidProtectedOutput(result)) {
