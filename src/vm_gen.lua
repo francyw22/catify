@@ -1305,14 +1305,14 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         -- The XOR decode is inlined as a function expression; emask is obfuscated.
         local emask_expr = _obfInt(emask)
         local eraw = table.concat(echunks, "..")
+        LF("local _atRbOk,_atRbVal=pcall(function() return type(typeof)=='function' and typeof(task)=='table' end)")
+        LF("local _atIsRoblox=_atRbOk and _atRbVal")
         LF("if %s~=%s then", atSha, atShaExp)
         LF("  local %s=%s", atErrEnc, eraw)
         LF("  local %s={}", atErrDec)
         LF("  for %s=1,#%s do %s[%s]=string.char(%s(%s:byte(%s),%s)) end", atErrI, atErrEnc, atErrDec, atErrI, bXor, atErrEnc, atErrI, emask_expr)
-        LF("  local _catify_emsg=table.concat(%s)", atErrDec)
-        LF("  local _catify_ok,_catify_has_task=pcall(function() return type(typeof)=='function' and typeof(task)=='table' end)")
-        LF("  local _catify_is_roblox=_catify_ok and _catify_has_task")
-        LF("  if _catify_is_roblox then warn(_catify_emsg) else error(_catify_emsg,0) end")
+        LF("  local _atErr=table.concat(%s)", atErrDec)
+        LF("  if _atIsRoblox then warn(_atErr) else error(_atErr,0) end")
         LF("end")
     end
 
