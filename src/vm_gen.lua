@@ -688,8 +688,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("  %s=bit32[b];%s=bit32[c];%s=bit32[d];%s=bit32[e]", bXor,bNot,bAnd,bOr)
     -- bit32.lshift and bit32.rshift may be absent in some Roblox Luau builds.
     -- Fall back to a math-based equivalent using bit32.band (always present).
-    LF("  %s=bit32[f] or function(a,b) if b>=32 then return 0 end;return bit32[d](a*(2^b),0xFFFFFFFF) end", bShl)
-    LF("  %s=bit32[g] or function(a,b) if b>=32 then return 0 end;return math.floor(bit32[d](a,0xFFFFFFFF)/(2^b)) end", bShr)
+    LF("  %s=bit32[f] or function(a,b) if b>=32 then return 0 end;a=bit32[d](a,0xFFFFFFFF);for _j=1,b do a=bit32[d](a+a,0xFFFFFFFF) end;return a end", bShl)
+    LF("  %s=bit32[g] or function(a,b) if b>=32 then return 0 end;a=bit32[d](a,0xFFFFFFFF);for _j=1,b do a=math.floor(a/2) end;return a end", bShr)
     LF("else")
     LF("  if type(%s)~='function' then error(%s,0) end", vLoadCompat, _earlyLitStr("Catify: missing bitwise support"))
     LF("  local _f=%s('return function(a,b)return a~b end');if type(_f)~='function' then error(%s,0) end;%s=_f()", vLoadCompat, _earlyLitStr("Catify: missing bitwise support"), bXor)
