@@ -19,6 +19,8 @@
       !catify  (attachment) — Upload a .lua/.txt file; the bot obfuscates it and
                               returns the protected file as an attachment.
       !catify  help         — Show usage information.
+      .upload  (attachment) — Upload a .lua/.txt file to Pastefy and return
+                              Loadstring + direct URL.
 */
 
 "use strict";
@@ -48,6 +50,9 @@ const PREFIX       = process.env.CATIFY_PREFIX || "!";
 const PASSES       = Math.max(1, Math.min(2, parseInt(process.env.CATIFY_PASSES  || "1", 10)));
 const MAX_INLINE   = parseInt(process.env.CATIFY_MAX_INLINE || String(32  * 1024), 10);
 const MAX_FILE     = parseInt(process.env.CATIFY_MAX_FILE   || String(512 * 1024), 10);
+const PASTEFY_API_TOKEN = process.env.PASTEFY_API_TOKEN || "";
+const PASTEFY_API_URL = process.env.PASTEFY_API_URL || "https://pastefy.app/api/v2/paste";
+const UPLOAD_COMMAND = ".upload";
 // Generated protected outputs are substantially larger than tiny/invalid fragments; this guards obvious bad outputs.
 const MIN_PROTECTED_OUTPUT_LENGTH = 200;
 const PROTECTED_HEADER_REGEX = /^-- This file was protected by Catify v\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?/;
@@ -139,6 +144,80 @@ function downloadUrl(url) {
 }
 
 /**
+ * Upload content to Pastefy and resolve paste/raw URLs from API response.
+ * @param {string} content
+ * @param {string} title
+ * @returns {Promise<{ pasteUrl: string, rawUrl: string }>}
+ */
+function uploadToPastefy(content, title) {
+    return new Promise((resolve, reject) => {
+        if (!PASTEFY_API_TOKEN) {
+            reject(new Error("Missing PASTEFY_API_TOKEN."));
+            return;
+        }
+
+        const target = new URL(PASTEFY_API_URL);
+        const pasteBaseUrl = `${target.protocol}//${target.host}`;
+        const mod = target.protocol === "https:" ? https : http;
+        const body = JSON.stringify({
+            title: title || "catify-upload",
+            content,
+            visibility: "unlisted",
+        });
+
+        const headers = {
+            "Content-Type": "application/json",
+            "Content-Length": Buffer.byteLength(body),
+            "Accept": "application/json",
+            Authorization: `Bearer ${PASTEFY_API_TOKEN}`,
+        };
+
+        const req = mod.request({
+            protocol: target.protocol,
+            hostname: target.hostname,
+            port: target.port || undefined,
+            path: target.pathname + target.search,
+            method: "POST",
+            headers,
+        }, (res) => {
+            const chunks = [];
+            res.on("data", (chunk) => chunks.push(chunk));
+            res.on("end", () => {
+                const payload = Buffer.concat(chunks).toString("utf8");
+                if ((res.statusCode || 500) < 200 || (res.statusCode || 500) >= 300) {
+                    return reject(new Error(`Pastefy API error (${res.statusCode}): ${truncate(payload || "empty response", 300)}`));
+                }
+
+                let parsed = {};
+                try {
+                    parsed = payload ? JSON.parse(payload) : {};
+                } catch (_) {
+                    return reject(new Error("Pastefy API returned invalid JSON."));
+                }
+
+                const data = parsed && typeof parsed === "object" && parsed.data && typeof parsed.data === "object"
+                    ? parsed.data
+                    : parsed;
+                const id = data.id || data.pasteId || data.slug || data.key || null;
+                const url = data.url || data.pasteUrl || parsed.url || null;
+                const raw = data.raw || data.rawUrl || parsed.raw || null;
+
+                const pasteUrl = url || (id ? `${pasteBaseUrl}/${id}` : null);
+                const rawUrl = raw || (id ? `${pasteBaseUrl}/${id}/raw` : null);
+                if (!pasteUrl || !rawUrl) {
+                    return reject(new Error("Pastefy API response did not include paste URLs."));
+                }
+                resolve({ pasteUrl, rawUrl });
+            });
+        });
+
+        req.on("error", reject);
+        req.write(body);
+        req.end();
+    });
+}
+
+/**
  * Run the Catify CLI on the given source string.
  * Writes a temp input file, invokes `lua catify.lua`, reads the output.
  *
@@ -183,6 +262,11 @@ Prefix: \`${PREFIX}\`
 
 \`${PREFIX}catify help\`  — Show this message.
 
+\`.upload\` *(with .lua/.txt attachment)* — Uploads the file to **Pastefy** and responds with:
+  • **Loadstring:** \`loadstring(game:HttpGet('https://pastefy.app/example/raw'))()\`
+  • **Just Url:** \`https://pastefy.app/example\`
+  • **Platform:** **Pastefy**
+
 **love applied:**
 ***too much***`;
 
@@ -208,6 +292,50 @@ client.on("messageCreate", async (message) => {
     if (message.author.bot) return;
 
     const content = message.content || "";
+    if (content.toLowerCase().startsWith(UPLOAD_COMMAND)) {
+        const attachment = message.attachments.first();
+        if (!attachment) {
+            await message.reply("❌ Use `.upload` with a `.lua` or `.txt` attachment.");
+            return;
+        }
+        if (!PASTEFY_API_TOKEN) {
+            await message.reply("❌ Pastefy is not configured. Set `PASTEFY_API_TOKEN` in your `.env` file.");
+            return;
+        }
+
+        const attachmentExt = path.extname((attachment.name || "").toLowerCase());
+        if (!ALLOWED_ATTACHMENT_EXTENSIONS.has(attachmentExt)) {
+            await message.reply("❌ Attachment must be a `.lua` or `.txt` file.");
+            return;
+        }
+        const size = attachment.size || 0;
+        if (size > MAX_FILE) {
+            await message.reply(
+                `❌ Attachment too large (${Math.round(size / 1024)} KB, max ${MAX_FILE / 1024} KB).`
+            );
+            return;
+        }
+
+        await message.reply("⏳ Uploading to Pastefy…");
+
+        try {
+            const buf = await downloadUrl(attachment.url);
+            const source = buf.toString("utf8");
+            const { pasteUrl, rawUrl } = await uploadToPastefy(source, attachment.name || "catify-upload");
+            await message.reply(
+                `**Loadstring:**\n` +
+                `\`loadstring(game:HttpGet('${rawUrl}'))()\`\n` +
+                `- Just Url: ${pasteUrl}\n` +
+                `- Platform: **Pastefy**`
+            );
+        } catch (err) {
+            await message.reply(
+                "❌ Upload failed:\n```\n" + truncate(String(err.message || err), 1800) + "\n```"
+            );
+        }
+        return;
+    }
+
     const cmdFull = `${PREFIX}catify`;
 
     // Must start with the command prefix (case-insensitive)

@@ -71,6 +71,7 @@ chat command.
 | `!catify help` | Show usage |
 | `!catify print("hi")` | Obfuscate inline Lua code |
 | `!catify` + `.lua`/`.txt` file | Upload a file; bot returns the protected version |
+| `.upload` + `.lua`/`.txt` file | Upload a file to Pastefy and return Loadstring + URL |
 
 The bot also performs a basic integrity check on generated output before sending it.
 
@@ -83,6 +84,8 @@ The bot also performs a basic integrity check on generated output before sending
 | `CATIFY_PASSES` | `1` | Obfuscation passes (1 or 2) |
 | `CATIFY_MAX_INLINE` | `32768` | Max inline code size in bytes |
 | `CATIFY_MAX_FILE` | `524288` | Max attachment size in bytes |
+| `PASTEFY_API_TOKEN` | — | Pastefy API token for `.upload` command |
+| `PASTEFY_API_URL` | `https://pastefy.app/api/v2/paste` | Pastefy API endpoint override |
 
 ---
 
