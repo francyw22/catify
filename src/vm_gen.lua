@@ -1324,6 +1324,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("    local %s = game:GetService(%s)", atLighting, _obfLitStr("Lighting"))
     LF("    local %s = %s.ClockTime", atCheckVars[1], atLighting)
     LF("    if type(%s) ~= %s then return false end", atCheckVars[1], _obfLitStr("number"))
+    -- probeClockTime=13.75h, clockTol=1e-4, probeMinutes=825, minutesTol=0.1
     LF("    local %s, %s, %s, %s = 13.75, 1e-4, 825, 0.1", atCheckVars[6], atCheckVars[7], atCheckVars[8], atCheckVars[9])
     LF("    local %s, %s = pcall(function()", atCheckVars[2], atCheckVars[3])
     LF("        %s.ClockTime = %s", atLighting, atCheckVars[6])
