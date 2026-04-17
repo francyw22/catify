@@ -131,7 +131,7 @@ function formatObfuscationError(err) {
  * @returns {Promise<string>}
  */
 async function resolveLua53Runtime() {
-    if (LUA_BIN && (!/^[A-Za-z0-9_./:\\-]+$/.test(LUA_BIN) || LUA_BIN.startsWith("-"))) {
+    if (LUA_BIN && !isValidLuaBin(LUA_BIN)) {
         const err = new Error("Invalid CATIFY_LUA_BIN value");
         err.code = "CATIFY_LUA_BIN_INVALID";
         throw err;
@@ -157,6 +157,15 @@ async function resolveLua53Runtime() {
 function getLua53Runtime() {
     if (!lua53RuntimePromise) lua53RuntimePromise = resolveLua53Runtime();
     return lua53RuntimePromise;
+}
+
+function isValidLuaBin(value) {
+    if (!value || /\s/.test(value) || value.startsWith("-")) return false;
+    if (path.isAbsolute(value)) {
+        const normalized = path.normalize(value);
+        return !normalized.split(path.sep).includes("..");
+    }
+    return /^[A-Za-z0-9_.-]+$/.test(value);
 }
 
 /**
