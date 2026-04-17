@@ -87,6 +87,8 @@ The bot also performs a basic integrity check on generated output before sending
 | `PASTEFY_API_TOKEN` | — | Pastefy API token for `.upload` command |
 | `PASTEFY_API_URL` | `https://pastefy.app/api/v2/paste` | Pastefy API endpoint override |
 
+> Note: on Roblox/Luau runtime, a blob-integrity mismatch is emitted as a warning instead of throwing a hard runtime error to avoid multi-pass false positives.
+
 ---
 
 ## Output Format
