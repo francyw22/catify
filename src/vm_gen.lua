@@ -263,9 +263,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local atHashEnc = vn()
     local atHashDec = vn()
     local atHashI = vn()
-    local atErrEnc = vn()
-    local atErrDec = vn()
-    local atErrI = vn()
+    local atDetectFn = vn()
     local atEnvTbl = vn()
     local wmTbl = vn()
     local wmI = vn()
@@ -296,12 +294,10 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local vNp2 = vn()   -- nonce bytes 5-8, pre-XOR'd with nonce mask 2
     local vDk1 = vn()   -- decoy key fragment 1 (never used for real decryption)
     local vDk2 = vn()   -- decoy key fragment 2 (never used for real decryption)
-    -- Bitwise compat helpers: use randomized helper identifiers so fixed
-    -- helper signatures don't appear in output.
+    -- Bitwise compat helpers: use fully randomised names (plain vn() output) so
+    -- no fixed prefix/suffix pattern (__*_catify) is detectable by static grep.
     -- Native ops in load() strings bypass Luau's parser so older Luau versions work too.
-    local bXor, bNot, bAnd, bOr, bShl, bShr =
-        "__" .. vn() .. "_catify", "__" .. vn() .. "_catify", "__" .. vn() .. "_catify",
-        "__" .. vn() .. "_catify", "__" .. vn() .. "_catify", "__" .. vn() .. "_catify"
+    local bXor, bNot, bAnd, bOr, bShl, bShr = vn(), vn(), vn(), vn(), vn(), vn()
     local vLoadCompat = vn() -- load/loadstring runtime loader
     local vPack = vn()       -- table.pack compat
     local vUnpack = vn()     -- table.unpack compat
@@ -434,27 +430,220 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         return _JN[i], _JN[j], _JN[k2]
     end
 
-    -- Single junk form: dead assignment with a random string in the style of "7fn.zIS1u@xj"
-    -- (short alphanumeric + symbol mix, valid for Luau string literals).
-    -- Pool: alphanumerics plus symbols that appear in the reference style and are safe
-    -- inside Luau double-quoted strings (no backslash, no double-quote, no newline).
+    -- Ten forms of always-dead opaque predicates / no-op computations:
+    --  form 1: x XOR x == 0, never > 0
+    --  form 2: n // n == 1, never < 1
+    --  form 3: (a+b)*c - (a+b)*c == 0, never > 1
+    --  form 4: #"literal" == known length, dead if branch
+    --  form 5: table constructor immediately discarded, length always 0
+    --  form 6: multi-step XOR chain that cancels to 0
+    --  form 7: math.max(a, b) identity (a >= b, so result == a, dead sub-branch)
+    --  form 8: string.rep + #  identity
+    --  form 9: fake config table with dead branch (looks like real init code)
+    --  form 10: fake string sanitize (dead upper/lower branch)
+    -- Shared pool for forms 15-18: all printable ASCII valid in Luau long strings,
+    -- excluding ']' (would close [=[...]=]) and '%' (would corrupt string.format calls
+    -- in the generator). Only Luau/Roblox-safe ASCII characters are included.
     local _JUNK_POOL = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" ..
-                       ".-_@#!+*=?/^~|<>(){}:;"
+                       "!\"#$&'()*+,-./:;<=>?@[\\^_`{|}~"
     local function _junk_quote(s)
         return string.format("%q", s)
     end
     local junk_forms = {
-        -- form 1: random symbol-style string dead-code assignment
+        -- form 1: x XOR x == 0
+        function(indent)
+            local v1, v2 = jpick2()
+            local a = math.random(1, 0x7FFF)
+            local b = math.random(1, 0xFF)
+            return string.format(
+                "%sdo local %s=%d*%d;local %s=%s(%s,%s);if %s>0 then %s=%s+%d end end\n",
+                indent, v1, a, b, v2, bXor, v1, v1, v2, v1, v1, math.random(1, 0xFF))
+        end,
+        -- form 2: integer division identity
+        function(indent)
+            local v1, v2 = jpick2()
+            local a = math.random(2, 0x3FFF)
+            local c = math.random(1, 9)
+            return string.format(
+                "%sdo local %s=%d+%d;local %s=%s//%s;if %s<%d then %s=%s*%d end end\n",
+                indent, v1, a, c, v2, v1, v1, v2, 1, v1, v1, math.random(2, 9))
+        end,
+        -- form 3: product minus itself
+        function(indent)
+            local v1, v2 = jpick2()
+            local a = math.random(1, 0x1FFF)
+            local b = math.random(1, 0x1FFF)
+            local c = math.random(1, 7)
+            local prod = (a + b) * c
+            return string.format(
+                "%sdo local %s=(%d+%d)*%d;local %s=%s-%d;if %s>1 then %s=%s^2 end end\n",
+                indent, v1, a, b, c, v2, v1, prod, v2, v1, v1)
+        end,
+        -- form 4: string length identity (dead branch on impossible length)
         function(indent)
             local v1 = jpick()
-            local len = math.random(8, 24)
+            local words = {"cache","token","handle","driver","plugin","loader"}
+            local w = words[math.random(1, #words)]
+            local wrong_len = #w + math.random(1, 5)
+            return string.format(
+                "%sdo local %s=#%q;if %s==%d then %s=%s*0 end end\n",
+                indent, v1, w, v1, wrong_len, v1, v1)
+        end,
+        -- form 5: empty table, length check always 0
+        function(indent)
+            local v1, v2 = jpick2()
+            local n = math.random(1, 9)
+            return string.format(
+                "%sdo local %s={};for %s=1,%d do end;if #%s>0 then %s[1]=nil end end\n",
+                indent, v1, v2, n, v1, v1)
+        end,
+        -- form 6: multi-step XOR chain cancelling to 0
+        function(indent)
+            local v1, v2, v3 = jpick3()
+            local x = math.random(1, 0xFFFF)
+            local y = math.random(1, 0xFFFF)
+            local z = x ~ y
+            return string.format(
+                "%sdo local %s=%d;local %s=%d;local %s=%s(%s,%s);if %s(%s,%s)>0 then %s=%s(%s,1) end end\n",
+                indent, v1, x, v2, y, v3, bXor, v1, v2, bXor, v3, v1, v2, bOr, v2)
+        end,
+        -- form 7: math.max identity (always picks first arg)
+        function(indent)
+            local v1 = jpick()
+            local big = math.random(0x1000, 0x7FFF)
+            local small = math.random(1, big - 1)
+            return string.format(
+                "%sdo local %s=math.max(%d,%d);if %s<%d then %s=%s+1 end end\n",
+                indent, v1, big, small, v1, big, v1, v1)
+        end,
+        -- form 8: string.rep + #  identity
+        function(indent)
+            local v1 = jpick()
+            local ch = string.char(math.random(97, 122))   -- a-z
+            local n  = math.random(3, 8)
+            return string.format(
+                "%sdo local %s=string.rep(%q,%d);if #%s~=%d then %s=nil end end\n",
+                indent, v1, ch, n, v1, n, v1)
+        end,
+        -- form 9: fake config table with dead branch (looks like real init code)
+        function(indent)
+            local v1 = jpick()
+            local cfg_keys = {"timeout","retries","verbose","mode","level","limit"}
+            local k = cfg_keys[math.random(1, #cfg_keys)]
+            local v = math.random(0, 1) == 1 and "true" or tostring(math.random(1,9))
+            return string.format(
+                "%sdo local %s={%s=%s};if %s.%s==nil then %s.%s=%s end end\n",
+                indent, v1, k, v, v1, k, v1, k, v)
+        end,
+        -- form 10: fake string sanitize (dead upper/lower branch)
+        function(indent)
+            local v1, v2 = jpick2()
+            local words = {"data","value","result","output","buffer","token"}
+            local w = words[math.random(1, #words)]
+            return string.format(
+                "%sdo local %s=%q;local %s=string.upper(%s);if #%s<0 then %s=%s end end\n",
+                indent, v1, w, v2, v1, v2, v1, v2)
+        end,
+        -- form 11: integer division identity (no bXor) – b * (a // b) == a when divisible
+        function(indent)
+            local v1, v2 = jpick2()
+            local b = math.random(2, 9)
+            local q = math.random(1, 100)
+            local a = q * b  -- a is always divisible by b, so a // b == q
+            return string.format(
+                "%sdo local %s=%d;local %s=%s//%d;if %s~=%d then %s=%s*0 end end\n",
+                indent, v1, a, v2, v1, b, v2, q, v1, v1)
+        end,
+        -- form 12: string.byte + string.char round-trip identity (no bXor)
+        function(indent)
+            local v1, v2 = jpick2()
+            local bval = math.random(65, 90)  -- ASCII A-Z
+            return string.format(
+                "%sdo local %s=string.char(%d);local %s=string.byte(%s);if %s~=%d then %s=nil end end\n",
+                indent, v1, bval, v2, v1, v2, bval, v1)
+        end,
+        -- form 13: math.floor identity – floor of an integer is itself (no bXor)
+        function(indent)
+            local v1 = jpick()
+            local n = math.random(5, 9999)
+            return string.format(
+                "%sdo local %s=%d;if math.floor(%s)~=%s then %s=%s+1 end end\n",
+                indent, v1, n, v1, v1, v1, v1)
+        end,
+        -- form 14: tostring + # length identity (no bXor)
+        function(indent)
+            local v1, v2 = jpick2()
+            local n = math.random(10, 9999)
+            local slen = #tostring(n)
+            return string.format(
+                "%sdo local %s=%d;local %s=#tostring(%s);if %s~=%d then %s=%s*0 end end\n",
+                indent, v1, n, v2, v1, v2, slen, v1, v1)
+        end,
+        -- form 15: random garbage-string dead-code assignment (looks like obfuscated data/token)
+        -- Generates a fresh random string of 300-1500 printable ASCII chars (mix of alphanumeric
+        -- and Luau-valid symbols) each time; dead branch guarantees it never executes.
+        -- Uses _JUNK_POOL (no ']' or '%'); string concatenation avoids format-string injection.
+        function(indent)
+            local len = math.random(300, 1500)
             local chars = {}
             for i = 1, len do
                 local pos = math.random(1, #_JUNK_POOL)
                 chars[i] = _JUNK_POOL:sub(pos, pos)
             end
-            local s = table.concat(chars)
-            return indent.."do local "..v1.."=".._junk_quote(s)..";if #"..v1.."<0 then "..v1.."=nil end end\n"
+            local garbage = table.concat(chars)
+            local v1 = jpick()
+            return indent.."do local "..v1.."=".._junk_quote(garbage)..";if #"..v1.."<0 then "..v1.."=nil end end\n"
+        end,
+        -- form 16: very large symbol-heavy garbage string (8000-20000 chars).
+        -- Uses _JUNK_POOL (Luau-valid ASCII only); concatenation return avoids format-string injection.
+        function(indent)
+            local len = math.random(8000, 20000)
+            local chars = {}
+            for i = 1, len do
+                local pos = math.random(1, #_JUNK_POOL)
+                chars[i] = _JUNK_POOL:sub(pos, pos)
+            end
+            local garbage = table.concat(chars)
+            local v1 = jpick()
+            return indent.."do local "..v1.."=".._junk_quote(garbage)..";if #"..v1.."<0 then "..v1.."=nil end end\n"
+        end,
+        -- form 17: dead multi-string array — builds 50-150 symbol-heavy strings into a
+        -- table array and concatenates them; dead branch discards the result.
+        -- Each entry is 30-150 Luau-valid ASCII chars; total output 1500-22500 chars.
+        function(indent)
+            local count = math.random(50, 150)
+            local entries = {}
+            for i = 1, count do
+                local slen = math.random(30, 150)
+                local chars = {}
+                for j = 1, slen do
+                    local pos = math.random(1, #_JUNK_POOL)
+                    chars[j] = _JUNK_POOL:sub(pos, pos)
+                end
+                entries[i] = _junk_quote(table.concat(chars))
+            end
+            local v1, v2 = jpick2()
+            local tbl = table.concat(entries, ",")
+            return indent.."do local "..v1.."={"..tbl.."};local "..v2.."=table.concat("..v1..");if #"..v2.."<0 then "..v2.."=nil end end\n"
+        end,
+        -- form 18: dead symbol-string array — 20-60 Luau-valid ASCII symbol strings stored
+        -- in a table, length-checked, then discarded via always-false branch. Each string
+        -- 20-80 chars. Concatenation-built return; no string.format injection risk.
+        function(indent)
+            local count = math.random(20, 60)
+            local entries = {}
+            for i = 1, count do
+                local vlen = math.random(20, 80)
+                local vchars = {}
+                for j = 1, vlen do
+                    local pos = math.random(1, #_JUNK_POOL)
+                    vchars[j] = _JUNK_POOL:sub(pos, pos)
+                end
+                entries[i] = _junk_quote(table.concat(vchars))
+            end
+            local v1, v2 = jpick2()
+            local tbl = table.concat(entries, ",")
+            return indent.."do local "..v1.."={"..tbl.."};local "..v2.."=#"..v1..";if "..v2.."<0 then "..v1.."=nil end end\n"
         end,
     }
     local function junk_stmt(indent)
@@ -1096,35 +1285,89 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         LF("do local %s=%s local %s={} for %s=1,#%s do %s[%s]=string.char(%s(%s:byte(%s),%s)) end %s=table.concat(%s) end",
            atHashEnc, hraw, atHashDec, atHashI, atHashEnc, atHashDec, atHashI, bXor, atHashEnc, atHashI, hmask_expr, atShaExp, atHashDec)
     end
-    -- Obfuscate the integrity-check error message so it doesn't appear as plaintext.
-    do
-        local emsg = "[RUNTIME_ERROR] Catify: intg?ity ch4k failed"
-        local emask = math.random(1, 255)
-        local eparts = {}
-        for i = 1, #emsg do eparts[i] = _obfByte(emsg:byte(i) ~ emask) end
-        -- Split into chunks of 60 to stay within Lua's register limit.
-        local echunks = {}
-        for i = 1, #eparts, 60 do
-            local ch = {}
-            for j = i, math.min(i + 59, #eparts) do ch[#ch+1] = eparts[j] end
-            echunks[#echunks+1] = string.format("string.char(%s)", table.concat(ch, ","))
-        end
-        -- The XOR decode is inlined as a function expression; emask is obfuscated.
-        local emask_expr = _obfInt(emask)
-        local eraw = table.concat(echunks, "..")
-        LF("if %s~=%s then local %s=%s local %s={} for %s=1,#%s do %s[%s]=string.char(%s(%s:byte(%s),%s)) end error(table.concat(%s),0) end",
-           atSha, atShaExp, atErrEnc, eraw, atErrDec, atErrI, atErrEnc, atErrDec, atErrI, bXor, atErrEnc, atErrI, emask_expr, atErrDec)
-    end
+    LF("local function %s() print('detected by catify :3') return end", atDetectFn)
+    LF("if %s~=%s then %s() return end", atSha, atShaExp, atDetectFn)
 
     local env_expr = string.format("((function() local %s=((type(_ENV)=='table' and _ENV) or (type(getfenv)=='function' and getfenv(0)) or (type(_G)=='table' and _G) or {}); return (type(%s)=='table' and %s) or {} end)())", atEnvTbl, atEnvTbl, atEnvTbl)
 
-    -- Minimal anti-tamper surface: only verify delayed callback availability.
+    -- Minimal anti-tamper surface: verify key runtime primitives for env integrity.
     LF("local %s, %s = pcall(function()", atOk, atChkVal)
-    LF("    return typeof(task) == %s and typeof(task.delay) == %s", _obfLitStr("table"), _obfLitStr("function"))
+    LF("    local _e=%s", env_expr)
+    LF("    local _rg=(type(rawget)=='function' and rawget) or nil")
+    LF("    if type(_rg)~='function' then return false end")
+    LF("    local _task=_rg(_e,'task') or task")
+    LF("    local _dbg=_rg(_e,'debug')")
+    LF("    local _delay=(type(_task)=='table' and _rg(_task,'delay')) or nil")
+    -- string.dump does NOT exist in Luau (Roblox runtime). Do not require it.
+    LF("    local _gi=(type(_dbg)=='table' and _rg(_dbg,'getinfo')) or nil")
+    LF("    if type(_delay)~='function' or type(_gi)~='function' then return false end")
+    -- debug.gethook: detect executor hook injection. Executors typically call debug.sethook
+    -- to intercept every VM function call; gethook() returning non-nil betrays them.
+    LF("    local _gh=(type(_dbg)=='table' and _rg(_dbg,'gethook')) or nil")
+    LF("    if type(_gh)=='function' then local _hfn=_gh() if _hfn~=nil then return false end end")
+    -- Use _rg (rawget) as the probe — it is always a C function present in both Lua 5.3
+    -- and Roblox Luau.  string.dump was previously used here but does not exist in Luau.
+    LF("    local _gi_t=_gi(_rg)")
+    LF("    local _ws=_rg(_e,'workspace')")
+    LF("    local _v3=_rg(_e,'Vector3')")
+    LF("    local _r3=_rg(_e,'Region3')")
+    LF("    local _enum=_rg(_e,'Enum')")
+    LF("    local _terrain=(type(_ws)=='table' or type(_ws)=='userdata') and type(_ws.FindFirstChildOfClass)=='function' and _ws:FindFirstChildOfClass('Terrain') or nil")
+    LF("    local _terrain_ok=true")
+    LF("    if _terrain and type(_terrain.ReadVoxels)=='function' and type(_r3)=='table' and type(_v3)=='table' and type(_enum)=='table' and type(_enum.Material)=='table' then")
+    -- Fixed high-altitude 4x4x4 voxel probe region used as anti-tamper sentinel.
+    LF("      local _vox_ok,_materials=pcall(function()")
+    LF("        local _region=_r3.new(_v3.new(0,900,0),_v3.new(4,904,4))")
+    LF("        local _mats=_terrain:ReadVoxels(_region,4)")
+    LF("        return _mats")
+    LF("      end)")
+    LF("      if not _vox_ok or type(_materials)~='table' then _terrain_ok=false else")
+    LF("        local _all_air=true")
+    LF("        for _,_layer in ipairs(_materials) do")
+    LF("          if not _all_air then break end")
+    LF("          for _,_row in ipairs(_layer) do")
+    LF("            if not _all_air then break end")
+    LF("            for _,_mat in ipairs(_row) do")
+    LF("              if _mat~=_enum.Material.Air then _all_air=false break end")
+    LF("            end")
+    LF("          end")
+    LF("        end")
+    LF("        _terrain_ok=_all_air")
+    LF("      end")
+    LF("    end")
+    -- _sha_ok: known-answer test (KAT) — verify shaFn actually computes the correct hash
+    -- on a random input generated at obfuscation time, not just that it's a function.
+    -- Both utils.sha256 (generator-side, Lua 5.3) and the emitted shaFn (runtime, Luau/5.3)
+    -- implement the same standard SHA-256 algorithm from the same source; their outputs are
+    -- identical for any input.  A mismatch at runtime therefore means shaFn was patched or
+    -- replaced by an executor — which is exactly the tamper condition we want to detect.
+    do
+        -- 4–8 bytes: enough entropy that a brute-forced pre-image is impractical, yet short
+        -- enough to keep the embedded literal compact in the generated output.
+        local kat_len = math.random(4, 8)
+        local kat_raw = {}
+        for i = 1, kat_len do kat_raw[i] = math.random(0, 255) end
+        local kat_str_g = string.char(table.unpack(kat_raw))
+        local kat_sha_g = utils.sha256(kat_str_g)
+        local kat_imask = math.random(1, 255)
+        local kat_hmask = math.random(1, 255)
+        local kat_iparts = {}
+        for i = 1, kat_len do kat_iparts[i] = _obfByte(kat_raw[i] ~ kat_imask) end
+        local kat_hparts = {}
+        for i = 1, 32 do kat_hparts[i] = _obfByte(kat_sha_g:byte(i) ~ kat_hmask) end
+        LF("    local _kat_im=%s local _kat_hm=%s", _obfInt(kat_imask), _obfInt(kat_hmask))
+        LF("    local _kat_id={%s}", table.concat(kat_iparts, ","))
+        LF("    local _kat_hd={%s}", table.concat(kat_hparts, ","))
+        LF("    local _kat_is=(function()local _t={}for _i=1,#_kat_id do _t[_i]=string.char(%s(_kat_id[_i],_kat_im))end;return table.concat(_t)end)()", bXor)
+        LF("    local _kat_hs=(function()local _t={}for _i=1,#_kat_hd do _t[_i]=string.char(%s(_kat_hd[_i],_kat_hm))end;return table.concat(_t)end)()", bXor)
+        LF("    local _sha_ok=type(%s)=='function' and %s(_kat_is)==_kat_hs", shaFn, shaFn)
+    end
+    LF("    local _aes_ok=(type(%s)=='function')", vDecrypt)
+    LF("    return type(_gi_t)=='table' and _gi_t.what~=nil and _sha_ok and _aes_ok and _terrain_ok")
     LF("end)")
     LF("local %s = not (%s and %s)", atTrig, atOk, atChkVal)
     LF("if %s then", atTrig)
-    LF("    print('Detected by catify :3')")
+    LF("    %s()", atDetectFn)
     LF("    return")
     LF("end")
 
