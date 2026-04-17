@@ -24,10 +24,10 @@ heavily protected VM bytecode targeting **Roblox Luau** runtime.
 
 ```bash
 # Single-pass obfuscation
-lua catify.lua myscript.lua output.lua
+lua5.3 catify.lua myscript.lua output.lua
 
 # Two-pass (VM wrapped inside another VM — much harder to reverse)
-lua catify.lua --passes 2 myscript.lua output.lua
+lua5.3 catify.lua --passes 2 myscript.lua output.lua
 
 # Run the obfuscated script
 lua output.lua
@@ -43,7 +43,7 @@ chat command.
 ### Requirements
 
 - Node.js ≥ 18
-- `lua` 5.3+ in your `PATH`
+- `lua5.3` in your `PATH` (or `lua` pointing to Lua 5.3)
 
 ### Setup
 
