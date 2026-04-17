@@ -1290,51 +1290,22 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
 
     local env_expr = string.format("((function() local %s=((type(_ENV)=='table' and _ENV) or (type(getfenv)=='function' and getfenv(0)) or (type(_G)=='table' and _G) or {}); return (type(%s)=='table' and %s) or {} end)())", atEnvTbl, atEnvTbl, atEnvTbl)
 
-    -- Minimal anti-tamper surface: verify key runtime primitives for env integrity.
+    -- Anti-tamper surface: verify key runtime primitives for env integrity.
+    -- Checks kept: rawget availability, debug.getinfo probe (C-function type),
+    --              SHA-256 KAT, AES decrypt availability.
+    -- Checks removed to avoid false-positives in legitimate Roblox games:
+    --   * debug.gethook() — Roblox Studio and some internal systems set hooks legitimately.
+    --   * task.delay presence — task is a Luau userdata service; rawget returns nil.
+    --   * Terrain voxel probe — game-specific; any terrain at altitude 900-904 triggers it.
     LF("local %s, %s = pcall(function()", atOk, atChkVal)
     LF("    local _e=%s", env_expr)
     LF("    local _rg=(type(rawget)=='function' and rawget) or nil")
     LF("    if type(_rg)~='function' then return false end")
-    LF("    local _task=_rg(_e,'task') or task")
-    LF("    local _dbg=_rg(_e,'debug')")
-    LF("    local _delay=(type(_task)=='table' and _rg(_task,'delay')) or nil")
+    LF("    local _dbg=_rg(_e,'debug') or debug")
     -- string.dump does NOT exist in Luau (Roblox runtime). Do not require it.
+    -- Use _rg (rawget) as the probe — always a C function in both Lua 5.3 and Roblox Luau.
     LF("    local _gi=(type(_dbg)=='table' and _rg(_dbg,'getinfo')) or nil")
-    LF("    if type(_delay)~='function' or type(_gi)~='function' then return false end")
-    -- debug.gethook: detect executor hook injection. Executors typically call debug.sethook
-    -- to intercept every VM function call; gethook() returning non-nil betrays them.
-    LF("    local _gh=(type(_dbg)=='table' and _rg(_dbg,'gethook')) or nil")
-    LF("    if type(_gh)=='function' then local _hfn=_gh() if _hfn~=nil then return false end end")
-    -- Use _rg (rawget) as the probe — it is always a C function present in both Lua 5.3
-    -- and Roblox Luau.  string.dump was previously used here but does not exist in Luau.
-    LF("    local _gi_t=_gi(_rg)")
-    LF("    local _ws=_rg(_e,'workspace')")
-    LF("    local _v3=_rg(_e,'Vector3')")
-    LF("    local _r3=_rg(_e,'Region3')")
-    LF("    local _enum=_rg(_e,'Enum')")
-    LF("    local _terrain=(type(_ws)=='table' or type(_ws)=='userdata') and type(_ws.FindFirstChildOfClass)=='function' and _ws:FindFirstChildOfClass('Terrain') or nil")
-    LF("    local _terrain_ok=true")
-    LF("    if _terrain and type(_terrain.ReadVoxels)=='function' and type(_r3)=='table' and type(_v3)=='table' and type(_enum)=='table' and type(_enum.Material)=='table' then")
-    -- Fixed high-altitude 4x4x4 voxel probe region used as anti-tamper sentinel.
-    LF("      local _vox_ok,_materials=pcall(function()")
-    LF("        local _region=_r3.new(_v3.new(0,900,0),_v3.new(4,904,4))")
-    LF("        local _mats=_terrain:ReadVoxels(_region,4)")
-    LF("        return _mats")
-    LF("      end)")
-    LF("      if not _vox_ok or type(_materials)~='table' then _terrain_ok=false else")
-    LF("        local _all_air=true")
-    LF("        for _,_layer in ipairs(_materials) do")
-    LF("          if not _all_air then break end")
-    LF("          for _,_row in ipairs(_layer) do")
-    LF("            if not _all_air then break end")
-    LF("            for _,_mat in ipairs(_row) do")
-    LF("              if _mat~=_enum.Material.Air then _all_air=false break end")
-    LF("            end")
-    LF("          end")
-    LF("        end")
-    LF("        _terrain_ok=_all_air")
-    LF("      end")
-    LF("    end")
+    LF("    local _gi_t=(type(_gi)=='function' and _gi(_rg)) or nil")
     -- _sha_ok: known-answer test (KAT) — verify shaFn actually computes the correct hash
     -- on a random input generated at obfuscation time, not just that it's a function.
     -- Both utils.sha256 (generator-side, Lua 5.3) and the emitted shaFn (runtime, Luau/5.3)
@@ -1363,7 +1334,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         LF("    local _sha_ok=type(%s)=='function' and %s(_kat_is)==_kat_hs", shaFn, shaFn)
     end
     LF("    local _aes_ok=(type(%s)=='function')", vDecrypt)
-    LF("    return type(_gi_t)=='table' and _gi_t.what~=nil and _sha_ok and _aes_ok and _terrain_ok")
+    LF("    return (_gi_t==nil or (type(_gi_t)=='table' and _gi_t.what~=nil)) and _sha_ok and _aes_ok")
     LF("end)")
     LF("local %s = not (%s and %s)", atTrig, atOk, atChkVal)
     LF("if %s then", atTrig)
