@@ -169,10 +169,8 @@ function uploadToPastefy(content, title) {
             "Content-Type": "application/json",
             "Content-Length": Buffer.byteLength(body),
             "Accept": "application/json",
+            Authorization: `Bearer ${PASTEFY_API_TOKEN}`,
         };
-        if (PASTEFY_API_TOKEN) {
-            headers.Authorization = `Bearer ${PASTEFY_API_TOKEN}`;
-        }
 
         const req = mod.request({
             protocol: target.protocol,
