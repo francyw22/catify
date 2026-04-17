@@ -151,7 +151,13 @@ function downloadUrl(url) {
  */
 function uploadToPastefy(content, title) {
     return new Promise((resolve, reject) => {
+        if (!PASTEFY_API_TOKEN) {
+            reject(new Error("Missing PASTEFY_API_TOKEN."));
+            return;
+        }
+
         const target = new URL(PASTEFY_API_URL);
+        const pasteBaseUrl = `${target.protocol}//${target.host}`;
         const mod = target.protocol === "https:" ? https : http;
         const body = JSON.stringify({
             title: title || "catify-upload",
@@ -198,8 +204,8 @@ function uploadToPastefy(content, title) {
                 const url = data.url || data.pasteUrl || parsed.url || null;
                 const raw = data.raw || data.rawUrl || parsed.raw || null;
 
-                const pasteUrl = url || (id ? `https://pastefy.app/${id}` : null);
-                const rawUrl = raw || (id ? `https://pastefy.app/${id}/raw` : null);
+                const pasteUrl = url || (id ? `${pasteBaseUrl}/${id}` : null);
+                const rawUrl = raw || (id ? `${pasteBaseUrl}/${id}/raw` : null);
                 if (!pasteUrl || !rawUrl) {
                     return reject(new Error("Pastefy API response did not include paste URLs."));
                 }
