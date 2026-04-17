@@ -125,7 +125,6 @@ end
 -- Base91 uses only safe printable ASCII characters, making the output resilient
 -- to any third-party tool that processes or re-encodes the generated Lua file.
 local PAYLOAD_VAR_NAME = "superflow_bytecode"
-local ANTI_TAMPER_CHECK_COUNT = 32
 local function emit_payload_b91(b91str)
     -- Declare as local inside the wrapper function so it doesn't pollute global scope.
     return "local " .. PAYLOAD_VAR_NAME .. "=" .. string.format("%q", b91str) .. ";"
@@ -238,25 +237,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     -- Runtime anti-tamper variable names (avoid static signatures in output)
     local atTrig    = vn()
     local atOk      = vn()
-    local atRs      = vn()
-    local atPart    = vn()
-    local atFolder  = vn()
-    local atPlayers = vn()
-    local atHttp    = vn()
-    local atCf      = vn()
-    local atT1      = vn()
-    local atT2      = vn()
-    local atGuidOk  = vn()
-    local atGuid    = vn()
-    local atChecks  = vn()
-    local atPassed  = vn()
     local atChkVal  = vn()
-    local atMaterialEnums = vn()
-    local atLighting = vn()
-    local atCheckVars = {}
-    for i = 1, ANTI_TAMPER_CHECK_COUNT do
-        atCheckVars[i] = vn()
-    end
     -- Watermark variable name
     local vWm       = vn()
     -- Extra randomized temp names for emitted anti-tamper/decode/watermark/key assembly code
