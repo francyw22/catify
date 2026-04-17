@@ -105,11 +105,15 @@ function formatObfuscationError(err) {
     const raw = String((err && (err.stderr || err.message)) || "").replace(/\r/g, "");
     if (/\[Catify\]\s*Unsupported Lua runtime/i.test(raw)) {
         return "❌ Catify bot config error: Lua 5.3 is required on the bot host. " +
-            "Install/use `lua5.3` or set `CATIFY_LUA_BIN` to a Lua 5.3 executable.";
+            "Install/use 'lua5.3' or set 'CATIFY_LUA_BIN' to a Lua 5.3 executable.";
     }
     if ((err && err.code) === "CATIFY_LUA53_NOT_FOUND") {
         return "❌ Catify bot config error: Lua 5.3 runtime was not found. " +
-            "Install Lua 5.3 and/or set `CATIFY_LUA_BIN` in bot/.env.";
+            "Install Lua 5.3 and/or set 'CATIFY_LUA_BIN' in bot/.env.";
+    }
+    if ((err && err.code) === "CATIFY_LUA_BIN_INVALID") {
+        return "❌ Catify bot config error: CATIFY_LUA_BIN contains invalid characters. " +
+            "Use only an executable name/path (no spaces or arguments).";
     }
     const lines = raw.split("\n").map((s) => s.trim()).filter(Boolean);
     const catifyLine = lines.find((line) =>
@@ -127,6 +131,11 @@ function formatObfuscationError(err) {
  * @returns {Promise<string>}
  */
 async function resolveLua53Runtime() {
+    if (LUA_BIN && (!/^[A-Za-z0-9_./:\\-]+$/.test(LUA_BIN) || LUA_BIN.startsWith("-"))) {
+        const err = new Error("Invalid CATIFY_LUA_BIN value");
+        err.code = "CATIFY_LUA_BIN_INVALID";
+        throw err;
+    }
     for (const bin of LUA_BIN_CANDIDATES) {
         try {
             const { stdout } = await execFileAsync(bin, ["-e", "io.write(_VERSION or '')"], {
