@@ -294,6 +294,10 @@ client.on("messageCreate", async (message) => {
             await message.reply("❌ Use `.upload` with a `.lua` or `.txt` attachment.");
             return;
         }
+        if (!PASTEFY_API_TOKEN) {
+            await message.reply("❌ Pastefy is not configured. Set `PASTEFY_API_TOKEN` in `bot/.env`.");
+            return;
+        }
 
         const attachmentExt = path.extname((attachment.name || "").toLowerCase());
         if (!ALLOWED_ATTACHMENT_EXTENSIONS.has(attachmentExt)) {
@@ -305,10 +309,6 @@ client.on("messageCreate", async (message) => {
             await message.reply(
                 `❌ Attachment too large (${Math.round(size / 1024)} KB, max ${MAX_FILE / 1024} KB).`
             );
-            return;
-        }
-        if (!PASTEFY_API_TOKEN) {
-            await message.reply("❌ Pastefy is not configured. Set `PASTEFY_API_TOKEN` in `bot/.env`.");
             return;
         }
 
