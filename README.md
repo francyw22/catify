@@ -43,7 +43,7 @@ chat command.
 ### Requirements
 
 - Node.js ≥ 18
-- `lua5.3` in your `PATH` (or `lua` pointing to Lua 5.3)
+- Lua 5.3 runtime in your `PATH` (`lua5.3` recommended), or set `CATIFY_LUA_BIN`
 
 ### Setup
 
@@ -83,6 +83,8 @@ The bot also performs a basic integrity check on generated output before sending
 | `CATIFY_PASSES` | `1` | Obfuscation passes (1 or 2) |
 | `CATIFY_MAX_INLINE` | `32768` | Max inline code size in bytes |
 | `CATIFY_MAX_FILE` | `524288` | Max attachment size in bytes |
+| `CATIFY_LUA_BIN` | auto-detected (`lua5.3` → `lua53` → `lua`) | Lua executable name to run (no path/args); must resolve to Lua 5.3 |
+| `CATIFY_DEBUG_RUNTIME` | `0` | Set to `1` to log failed Lua runtime detection attempts |
 
 ---
 
