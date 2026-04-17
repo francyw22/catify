@@ -1318,13 +1318,9 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
 
     local env_expr = string.format("((function() local %s=((type(_ENV)=='table' and _ENV) or (type(getfenv)=='function' and getfenv(0)) or (type(_G)=='table' and _G) or {}); return (type(%s)=='table' and %s) or {} end)())", atEnvTbl, atEnvTbl, atEnvTbl)
 
-    -- Minimal anti-tamper surface: verify delayed callback availability + BrickColor consistency.
+    -- Minimal anti-tamper surface: only verify delayed callback availability.
     LF("local %s, %s = pcall(function()", atOk, atChkVal)
-    LF("    local _atBc=BrickColor.new(%s)", _obfLitStr("Bright red"))
-    LF("    local _atC3=_atBc.Color")
-    LF("    local _atRc=BrickColor.new(Color3.new(_atC3.R,_atC3.G,_atC3.B))")
-    LF("    return typeof(task) == %s and typeof(task.delay) == %s and _atRc.Number == _atBc.Number and type(_atBc.Number) == %s and _atBc.Number > 0",
-       _obfLitStr("table"), _obfLitStr("function"), _obfLitStr("number"))
+    LF("    return typeof(task) == %s and typeof(task.delay) == %s", _obfLitStr("table"), _obfLitStr("function"))
     LF("end)")
     LF("local %s = not (%s and %s)", atTrig, atOk, atChkVal)
     LF("if %s then", atTrig)
