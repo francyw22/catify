@@ -646,8 +646,40 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
             return indent.."do local "..v1.."={"..tbl.."};local "..v2.."=#"..v1..";if "..v2.."<0 then "..v1.."=nil end end\n"
         end,
     }
+    -- Reduce runaway output bloat by weighting very heavy junk forms lower and
+    -- capping how many times forms 16-18 can be emitted per generated VM.
+    local _JUNK_WEIGHTS = {
+        10,10,10,10,10,10,10,10,10,10,10,10,10,10,4,1,1,1
+    }
+    local _JUNK_HEAVY_START = 16
+    local _JUNK_HEAVY_MAX = math.random(1, 3)
+    local _junk_heavy_used = 0
+
     local function junk_stmt(indent)
-        return junk_forms[math.random(1, #junk_forms)](indent)
+        local total = 0
+        local usable = {}
+        for i = 1, #junk_forms do
+            local w = _JUNK_WEIGHTS[i] or 1
+            if i >= _JUNK_HEAVY_START and _junk_heavy_used >= _JUNK_HEAVY_MAX then
+                w = 0
+            end
+            usable[i] = w
+            total = total + w
+        end
+        local pick = math.random(1, total)
+        local acc = 0
+        local idx = 1
+        for i = 1, #junk_forms do
+            acc = acc + usable[i]
+            if pick <= acc then
+                idx = i
+                break
+            end
+        end
+        if idx >= _JUNK_HEAVY_START then
+            _junk_heavy_used = _junk_heavy_used + 1
+        end
+        return junk_forms[idx](indent)
     end
     -- Emit `k` consecutive junk statements with the given indent.
     local function junk_block(indent, k)
