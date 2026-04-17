@@ -295,7 +295,7 @@ client.on("messageCreate", async (message) => {
             return;
         }
         if (!PASTEFY_API_TOKEN) {
-            await message.reply("❌ Pastefy is not configured. Set `PASTEFY_API_TOKEN` in `bot/.env`.");
+            await message.reply("❌ Pastefy is not configured. Set `PASTEFY_API_TOKEN` in your `.env` file.");
             return;
         }
 
