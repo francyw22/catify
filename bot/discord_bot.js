@@ -113,7 +113,7 @@ function formatObfuscationError(err) {
     }
     if ((err && err.code) === "CATIFY_LUA_BIN_INVALID") {
         return "❌ Catify bot config error: CATIFY_LUA_BIN contains invalid characters. " +
-            "Use only an executable name/path (no spaces or arguments).";
+            "Use only an executable name (no spaces, paths, or arguments).";
     }
     const lines = raw.split("\n").map((s) => s.trim()).filter(Boolean);
     const catifyLine = lines.find((line) =>
@@ -160,11 +160,7 @@ function getLua53Runtime() {
 }
 
 function isValidLuaBin(value) {
-    if (!value || /\s/.test(value) || value.startsWith("-")) return false;
-    if (path.isAbsolute(value)) {
-        const normalized = path.normalize(value);
-        return !normalized.split(path.sep).includes("..");
-    }
+    if (!value || /\s/.test(value) || value.startsWith("-") || /[\\/]/.test(value)) return false;
     return /^[A-Za-z0-9_.-]+$/.test(value);
 }
 
