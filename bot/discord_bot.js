@@ -93,6 +93,24 @@ function truncate(s, max) {
 }
 
 /**
+ * Produce a user-safe obfuscation error string with script-focused details only.
+ * @param {unknown} err
+ * @returns {string}
+ */
+function formatObfuscationError(err) {
+    const raw = String((err && (err.stderr || err.message)) || "").replace(/\r/g, "");
+    const lines = raw.split("\n").map((s) => s.trim()).filter(Boolean);
+    const catifyLine = lines.find((line) =>
+        /\[Catify\]\s*(Syntax error|Parser error|Re-compile error|Re-parse error)/i.test(line)
+    );
+    const detail = (catifyLine || lines[lines.length - 1] || "unknown error")
+        .replace(/^\[Catify\]\s*/i, "");
+    return "error while obfuscating. due to the error in your script:\n```\n" +
+        truncate(detail, 1800) +
+        "\n```";
+}
+
+/**
  * Validate minimal structural integrity of Catify output before replying to the user.
  * @param {string} content
  * @returns {boolean}
@@ -247,9 +265,7 @@ client.on("messageCreate", async (message) => {
         try {
             result = await obfuscate(source, PASSES);
         } catch (err) {
-            await message.reply(
-                "❌ Obfuscation failed:\n```\n" + truncate(String(err.stderr || err.message), 1800) + "\n```"
-            );
+            await message.reply(formatObfuscationError(err));
             return;
         }
         if (!hasValidProtectedOutput(result)) {
@@ -287,9 +303,7 @@ client.on("messageCreate", async (message) => {
     try {
         result = await obfuscate(source, PASSES);
     } catch (err) {
-        await message.reply(
-            "❌ Obfuscation failed:\n```\n" + truncate(String(err.stderr || err.message), 1800) + "\n```"
-        );
+        await message.reply(formatObfuscationError(err));
         return;
     }
     if (!hasValidProtectedOutput(result)) {
