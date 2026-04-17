@@ -49,6 +49,7 @@ const PASSES       = Math.max(1, Math.min(2, parseInt(process.env.CATIFY_PASSES 
 const MAX_INLINE   = parseInt(process.env.CATIFY_MAX_INLINE || String(32  * 1024), 10);
 const MAX_FILE     = parseInt(process.env.CATIFY_MAX_FILE   || String(512 * 1024), 10);
 const LUA_BIN      = (process.env.CATIFY_LUA_BIN || "").trim();
+const DEBUG_RUNTIME_DETECTION = process.env.CATIFY_DEBUG_RUNTIME === "1";
 const LUA_VERSION_CHECK_TIMEOUT_MS = 5000;
 // Generated protected outputs are substantially larger than tiny/invalid fragments; this guards obvious bad outputs.
 const MIN_PROTECTED_OUTPUT_LENGTH = 200;
@@ -146,6 +147,9 @@ async function resolveLua53Runtime() {
                 return bin;
             }
         } catch (_) {
+            if (DEBUG_RUNTIME_DETECTION) {
+                console.warn(`[Catify Bot] Lua runtime candidate failed: ${bin}`);
+            }
             // Try next candidate.
         }
     }
@@ -160,7 +164,15 @@ function getLua53Runtime() {
 }
 
 function isValidLuaBin(value) {
-    if (!value || /\s/.test(value) || value.startsWith("-") || /[\\/]/.test(value)) return false;
+    if (!value || hasUnsafeLuaBinChars(value)) return false;
+    return isExecutableName(value);
+}
+
+function hasUnsafeLuaBinChars(value) {
+    return /\s/.test(value) || value.startsWith("-") || /[\\/]/.test(value);
+}
+
+function isExecutableName(value) {
     return /^[A-Za-z0-9_.-]+$/.test(value);
 }
 
