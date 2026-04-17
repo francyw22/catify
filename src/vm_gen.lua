@@ -666,6 +666,9 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
             usable[i] = w
             total = total + w
         end
+        if total <= 0 then
+            return junk_forms[math.random(1, #junk_forms)](indent)
+        end
         local pick = math.random(1, total)
         local acc = 0
         local idx = 1
