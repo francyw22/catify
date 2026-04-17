@@ -162,7 +162,7 @@ function uploadToPastefy(content, title) {
         const body = JSON.stringify({
             title: title || "catify-upload",
             content,
-            visibility: "unlisted",
+            visibility: "UNLISTED",
         });
 
         const headers = {
