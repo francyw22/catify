@@ -1318,9 +1318,19 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
 
     local env_expr = string.format("((function() local %s=((type(_ENV)=='table' and _ENV) or (type(getfenv)=='function' and getfenv(0)) or (type(_G)=='table' and _G) or {}); return (type(%s)=='table' and %s) or {} end)())", atEnvTbl, atEnvTbl, atEnvTbl)
 
-    -- Minimal anti-tamper surface: only verify delayed callback availability.
+    -- Minimal anti-tamper surface: verify delayed callback availability + Lighting clock integrity.
     LF("local %s, %s = pcall(function()", atOk, atChkVal)
-    LF("    return typeof(task) == %s and typeof(task.delay) == %s", _obfLitStr("table"), _obfLitStr("function"))
+    LF("    if not (typeof(task) == %s and typeof(task.delay) == %s) then return false end", _obfLitStr("table"), _obfLitStr("function"))
+    LF("    local %s = game:GetService(%s)", atLighting, _obfLitStr("Lighting"))
+    LF("    local %s = %s.ClockTime", atCheckVars[1], atLighting)
+    LF("    local %s, %s = pcall(function()", atCheckVars[2], atCheckVars[3])
+    LF("        %s.ClockTime = 13.75", atLighting)
+    LF("        %s = %s.ClockTime", atCheckVars[4], atLighting)
+    LF("        %s = %s:GetMinutesAfterMidnight()", atCheckVars[5], atLighting)
+    LF("    end)")
+    LF("    %s.ClockTime = %s", atLighting, atCheckVars[1])
+    LF("    if not %s then return false end", atCheckVars[2])
+    LF("    return math.abs(%s - 13.75) < 1e-4 and math.abs(%s - 825) < 0.1", atCheckVars[4], atCheckVars[5])
     LF("end)")
     LF("local %s = not (%s and %s)", atTrig, atOk, atChkVal)
     LF("if %s then", atTrig)
