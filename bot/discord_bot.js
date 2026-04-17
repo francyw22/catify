@@ -160,7 +160,6 @@ function uploadToPastefy(content, title) {
         const pasteBaseUrl = `${target.protocol}//${target.host}`;
         const mod = target.protocol === "https:" ? https : http;
         const body = JSON.stringify({
-            type: "PASTE",
             title: title || "catify-upload",
             content,
             visibility: "UNLISTED",
@@ -196,15 +195,12 @@ function uploadToPastefy(content, title) {
                     return reject(new Error("Pastefy API returned invalid JSON."));
                 }
 
-                const candidates = [
-                    parsed,
-                    parsed && parsed.data,
-                    parsed && parsed.paste,
-                ].filter((value) => value && typeof value === "object");
-                const data = candidates.find((value) => value.id || value.pasteId || value.slug || value.key) || candidates[0] || {};
+                const data = parsed && typeof parsed === "object" && parsed.data && typeof parsed.data === "object"
+                    ? parsed.data
+                    : parsed;
                 const id = data.id || data.pasteId || data.slug || data.key || null;
-                const url = data.url || data.pasteUrl || data.paste_url || data.link || parsed.url || null;
-                const raw = data.raw || data.rawUrl || data.raw_url || data.rawLink || parsed.raw || null;
+                const url = data.url || data.pasteUrl || parsed.url || null;
+                const raw = data.raw || data.rawUrl || parsed.raw || null;
 
                 const pasteUrl = url || (id ? `${pasteBaseUrl}/${id}` : null);
                 const rawUrl = raw || (id ? `${pasteBaseUrl}/${id}/raw` : null);
