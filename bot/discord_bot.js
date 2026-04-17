@@ -49,6 +49,7 @@ const PASSES       = Math.max(1, Math.min(2, parseInt(process.env.CATIFY_PASSES 
 const MAX_INLINE   = parseInt(process.env.CATIFY_MAX_INLINE || String(32  * 1024), 10);
 const MAX_FILE     = parseInt(process.env.CATIFY_MAX_FILE   || String(512 * 1024), 10);
 const LUA_BIN      = (process.env.CATIFY_LUA_BIN || "").trim();
+const LUA_VERSION_CHECK_TIMEOUT_MS = 5000;
 // Generated protected outputs are substantially larger than tiny/invalid fragments; this guards obvious bad outputs.
 const MIN_PROTECTED_OUTPUT_LENGTH = 200;
 const PROTECTED_HEADER_REGEX = /^-- This file was protected by Catify v\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?/;
@@ -128,10 +129,10 @@ function formatObfuscationError(err) {
 async function resolveLua53Runtime() {
     for (const bin of LUA_BIN_CANDIDATES) {
         try {
-            const { stdout, stderr } = await execFileAsync(bin, ["-e", "io.write(_VERSION or '')"], {
-                timeout: 5000,
+            const { stdout } = await execFileAsync(bin, ["-e", "io.write(_VERSION or '')"], {
+                timeout: LUA_VERSION_CHECK_TIMEOUT_MS,
             });
-            const versionLine = String((stdout || "") + (stderr || "")).trim();
+            const versionLine = String(stdout || "").trim();
             if (/^Lua\s+5\.3\b/i.test(versionLine)) {
                 return bin;
             }

@@ -83,7 +83,7 @@ The bot also performs a basic integrity check on generated output before sending
 | `CATIFY_PASSES` | `1` | Obfuscation passes (1 or 2) |
 | `CATIFY_MAX_INLINE` | `32768` | Max inline code size in bytes |
 | `CATIFY_MAX_FILE` | `524288` | Max attachment size in bytes |
-| `CATIFY_LUA_BIN` | auto (`lua5.3`, `lua53`, `lua`) | Lua executable path/name; must resolve to Lua 5.3 |
+| `CATIFY_LUA_BIN` | auto-detected (`lua5.3` → `lua53` → `lua`) | Lua executable path/name; must resolve to Lua 5.3 |
 
 ---
 
