@@ -115,9 +115,21 @@ local function info(fmt, ...)
     io.stderr:write(string.format("[Catify] " .. fmt .. "\n", ...))
 end
 
+local function ensure_lua53_runtime()
+    local v = tostring(_VERSION or "")
+    if not v:match("^Lua 5%.3") then
+        io.stderr:write(string.format(
+            "[Catify] Unsupported Lua runtime: %s\n[Catify] Catify currently requires Lua 5.3 bytecode. Run with `lua5.3 catify.lua ...`.\n",
+            v ~= "" and v or "unknown"
+        ))
+        os.exit(1)
+    end
+end
+
 -- ─── Main ─────────────────────────────────────────────────────────────────────
 local function main(argv)
     io.stderr:write(BANNER .. "\n")
+    ensure_lua53_runtime()
 
     local ok, opts_or_err = pcall(parse_args, argv)
     if not ok then
