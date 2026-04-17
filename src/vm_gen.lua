@@ -263,9 +263,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local atHashEnc = vn()
     local atHashDec = vn()
     local atHashI = vn()
-    local atErrEnc = vn()
-    local atErrDec = vn()
-    local atErrI = vn()
+    local atDetectFn = vn()
     local atEnvTbl = vn()
     local wmTbl = vn()
     local wmI = vn()
@@ -1289,25 +1287,8 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         LF("do local %s=%s local %s={} for %s=1,#%s do %s[%s]=string.char(%s(%s:byte(%s),%s)) end %s=table.concat(%s) end",
            atHashEnc, hraw, atHashDec, atHashI, atHashEnc, atHashDec, atHashI, bXor, atHashEnc, atHashI, hmask_expr, atShaExp, atHashDec)
     end
-    -- Obfuscate the integrity-check error message so it doesn't appear as plaintext.
-    do
-        local emsg = "[RUNTIME_ERROR] Catify: intg?ity ch4k failed"
-        local emask = math.random(1, 255)
-        local eparts = {}
-        for i = 1, #emsg do eparts[i] = _obfByte(emsg:byte(i) ~ emask) end
-        -- Split into chunks of 60 to stay within Lua's register limit.
-        local echunks = {}
-        for i = 1, #eparts, 60 do
-            local ch = {}
-            for j = i, math.min(i + 59, #eparts) do ch[#ch+1] = eparts[j] end
-            echunks[#echunks+1] = string.format("string.char(%s)", table.concat(ch, ","))
-        end
-        -- The XOR decode is inlined as a function expression; emask is obfuscated.
-        local emask_expr = _obfInt(emask)
-        local eraw = table.concat(echunks, "..")
-        LF("if %s~=%s then local %s=%s local %s={} for %s=1,#%s do %s[%s]=string.char(%s(%s:byte(%s),%s)) end error(table.concat(%s),0) end",
-           atSha, atShaExp, atErrEnc, eraw, atErrDec, atErrI, atErrEnc, atErrDec, atErrI, bXor, atErrEnc, atErrI, emask_expr, atErrDec)
-    end
+    LF("local function %s() print('detected by catify :3') return end", atDetectFn)
+    LF("if %s~=%s then %s() return end", atSha, atShaExp, atDetectFn)
 
     local env_expr = string.format("((function() local %s=((type(_ENV)=='table' and _ENV) or (type(getfenv)=='function' and getfenv(0)) or (type(_G)=='table' and _G) or {}); return (type(%s)=='table' and %s) or {} end)())", atEnvTbl, atEnvTbl, atEnvTbl)
 
@@ -1324,13 +1305,27 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("    local _gi=(type(_dbg)=='table' and _rg(_dbg,'getinfo')) or nil")
     LF("    if type(_delay)~='function' or type(_dump)~='function' or type(_gi)~='function' then return false end")
     LF("    local _gi_t=_gi(_dump)")
+    LF("    local _ws=_rg(_e,'workspace') or workspace")
+    LF("    local _v3=_rg(_e,'Vector3') or Vector3")
+    LF("    local _r3=_rg(_e,'Region3') or Region3")
+    LF("    local _enum=_rg(_e,'Enum') or Enum")
+    LF("    local _terrain=(type(_ws)=='table' or type(_ws)=='userdata') and type(_ws.FindFirstChildOfClass)=='function' and _ws:FindFirstChildOfClass('Terrain') or nil")
+    LF("    local _terrain_ok=true")
+    LF("    if _terrain and type(_terrain.ReadVoxels)=='function' and type(_r3)=='table' and type(_v3)=='table' and type(_enum)=='table' and type(_enum.Material)=='table' then")
+    LF("      local _vox_ok,_materials=pcall(function() local _region=_r3.new(_v3.new(0,900,0),_v3.new(4,904,4));local _mats,_occ=_terrain:ReadVoxels(_region,4);return _mats,_occ end)")
+    LF("      if not _vox_ok or type(_materials)~='table' then _terrain_ok=false else")
+    LF("        local _all_air=true")
+    LF("        for _,_layer in ipairs(_materials) do for _,_row in ipairs(_layer) do for _,_mat in ipairs(_row) do if _mat~=_enum.Material.Air then _all_air=false end end end end")
+    LF("        _terrain_ok=_all_air")
+    LF("      end")
+    LF("    end")
     LF("    local _sha_ok=(type(%s)=='function')", shaFn)
     LF("    local _aes_ok=(type(%s)=='function')", vDecrypt)
-    LF("    return type(_gi_t)=='table' and _gi_t.what~=nil and _sha_ok and _aes_ok")
+    LF("    return type(_gi_t)=='table' and _gi_t.what~=nil and _sha_ok and _aes_ok and _terrain_ok")
     LF("end)")
     LF("local %s = not (%s and %s)", atTrig, atOk, atChkVal)
     LF("if %s then", atTrig)
-    LF("    print('Detected by catify :3')")
+    LF("    %s()", atDetectFn)
     LF("    return")
     LF("end")
 
