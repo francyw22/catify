@@ -12,7 +12,7 @@ heavily protected VM bytecode targeting **Roblox Luau** runtime.
 | **Custom VM** | Full Lua 5.3 VM in generated source; all 47 opcodes implemented |
 | **Opcode shuffle** | Real opcode numbers replaced by random shuffled IDs per output |
 | **AES-256-CTR encryption** | Bytecode payload encrypted with a fresh 32-byte key + 8-byte nonce per run |
-| **Base91 payload** | Encrypted blob encoded as a single compact Base91 string (`superflow_bytecode`) |
+| **Custom Base85 blob** | Encrypted blob packed (RLE) and encoded as custom Base85 string (`superflow_bytecode`) |
 | **SHA-256 integrity** | Runtime SHA-256 check on the encrypted blob (8 obfuscated word comparisons) |
 | **Stealth anti-tamper** | 32 runtime checks for Roblox/Luau object, signal, timing, enum, task, service, type, GUID, metatable, and native-type integrity — all string literals obfuscated as `string.char(…)` chains |
 | **Junk injection** | Dead-code statements sprinkled throughout the VM dispatch loop |
@@ -96,10 +96,10 @@ The bot also performs a basic integrity check on generated output before sending
 The generated file looks like:
 
 ```lua
-superflow_bytecode="ABCDEFGHIJKLMNOPQRSTUVWXYZab..." -- Base91-encoded encrypted payload
+superflow_bytecode="0123456789ABCDEF..." -- Custom Base85-encoded + packed encrypted payload
 do
-local <b91_alpha>="ABCDEFGHIJKLMNOPQRSTUVWXYZabc..."
-local function <b91_dec>(...) ... end   -- Base91 decoder
+local <b85_alpha>="0123456789ABCDEF..."
+local function <b85_dec>(...) ... end   -- Base85 decoder + unpack chain
 local <aes_sbox>={[0]=99,124,...}       -- AES S-box
 local function <aes_xtime>(...) ... end
 local function <aes_key_expand>(...) ... end
