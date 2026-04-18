@@ -141,7 +141,7 @@ end
 local function compact_source_lines(full)
     local compact_lines = {}
     for line in full:gmatch("[^\n]+") do
-        local trimmed = line:match("^%s*(.-)%s*$")
+        local trimmed = line:match("^%s*(.+)%s*$")
         if trimmed and trimmed ~= "" then
             compact_lines[#compact_lines + 1] = trimmed
         end
