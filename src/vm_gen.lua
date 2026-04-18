@@ -1488,8 +1488,10 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local wm_bytes = {32,32,47,92,95,47,92,32,32,10,32,40,111,46,111,32,41,10,32,32,62,32,94,32,60,10,32,67,97,116,105,102,121,32,118,50,46,48}
     local wm_parts = {}
     for i = 1, #wm_bytes do wm_parts[i] = tostring(wm_bytes[i]) end
-    LF("local %s=table.concat((function()local %s={};for %s,%s in ipairs({%s})do %s[%s]=string.char(%s)end;return %s end)())",
-       v.vWm, v.wmTbl, v.wmI, v.wmV, table.concat(wm_parts, ","), v.wmTbl, v.wmI, v.wmV, v.wmTbl)
+    LF("local %s={}", v.wmTbl)
+    LF("for %s,%s in ipairs({%s})do %s[%s]=string.char(%s)end",
+       v.wmI, v.wmV, table.concat(wm_parts, ","), v.wmTbl, v.wmI, v.wmV)
+    LF("local %s=table.concat(%s)", v.vWm, v.wmTbl)
 
     -- Decrypt and deserialize
     -- Assemble the real key from 4 pre-masked chunks (runtime unmask).
