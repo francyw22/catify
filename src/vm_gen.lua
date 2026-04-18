@@ -778,7 +778,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         LF("    elseif %s==%s then", v.b91V, stL(CST_B85_FILL))
         LF("      if %s<=%s then", v.b91P, v.b91N_)
         LF("        local _ch=%s[%s:byte(%s+%s-1)]", v.b91Tbl, v.b91I, v.b91B, v.b91P)
-        LF("        if _ch==nil then error(%s,0) end", _obfLitStr("Catify: invalid Base85 payload"))
+        LF("        if _ch==nil then break end")
         LF("        %s[%s]=_ch;%s=%s+1", v.b91Out, v.b91P, v.b91P, v.b91P)
         LF("      else %s=%s+%s;%s=%s end", v.b91B, v.b91B, v.b91N_, v.b91V, stL(CST_B85_EMIT))
         -- STATE: B85_EMIT — decode the filled 5-char group into raw bytes
@@ -1488,8 +1488,10 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local wm_bytes = {32,32,47,92,95,47,92,32,32,10,32,40,111,46,111,32,41,10,32,32,62,32,94,32,60,10,32,67,97,116,105,102,121,32,118,50,46,48}
     local wm_parts = {}
     for i = 1, #wm_bytes do wm_parts[i] = tostring(wm_bytes[i]) end
-    LF("local %s=table.concat((function()local %s={};for %s,%s in ipairs({%s})do %s[%s]=string.char(%s)end;return %s end)())",
-       v.vWm, v.wmTbl, v.wmI, v.wmV, table.concat(wm_parts, ","), v.wmTbl, v.wmI, v.wmV, v.wmTbl)
+    LF("local %s={}", v.wmTbl)
+    LF("for %s,%s in ipairs({%s})do %s[%s]=string.char(%s)end",
+       v.wmI, v.wmV, table.concat(wm_parts, ","), v.wmTbl, v.wmI, v.wmV)
+    LF("local %s=table.concat(%s)", v.vWm, v.wmTbl)
 
     -- Decrypt and deserialize
     -- Assemble the real key from 4 pre-masked chunks (runtime unmask).
