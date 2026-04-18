@@ -1318,11 +1318,23 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local env_expr = string.format("((function() local %s=((type(_ENV)=='table' and _ENV) or (type(getfenv)=='function' and getfenv(0)) or (type(_G)=='table' and _G) or {}); return (type(%s)=='table' and %s) or {} end)())", atEnvTbl, atEnvTbl, atEnvTbl)
 
     -- Minimal anti-tamper surface: verify delayed callback availability + Lighting clock integrity.
+    -- All property/method names, constructor refs, and enum paths are obfuscated via _obfLitStr()
+    -- to prevent static analysis from fingerprinting what the checks inspect.
     LF("local %s, %s = pcall(function()", atOk, atChkVal)
-    LF("    if not (typeof(task) == %s and typeof(task.delay) == %s) then return false end", _obfLitStr("table"), _obfLitStr("function"))
-    LF("    local %s, %s = pcall(function() return game:GetService(%s) end)", atCheckVars[11], atLighting, _obfLitStr("Lighting"))
+    -- Resolve the global env once, then alias all global constructors/enums through it so
+    -- no plain identifiers like Vector3, Instance, Enum, RaycastParams appear in output.
+    LF("    local %s=(type(_ENV)=='table' and _ENV) or (type(getfenv)=='function' and getfenv(0)) or _G or {}", atCheckVars[23])
+    LF("    local %s=%s[%s]", atCheckVars[24], atCheckVars[23], _obfLitStr("Instance"))
+    LF("    local %s=%s[%s]", atCheckVars[25], atCheckVars[23], _obfLitStr("Vector3"))
+    LF("    local %s=%s[%s]", atCheckVars[26], atCheckVars[23], _obfLitStr("Enum"))
+    LF("    local %s=%s[%s]", atCheckVars[27], atCheckVars[23], _obfLitStr("RaycastParams"))
+    -- task.delay type check: use bracket notation so "delay" doesn't appear plaintext.
+    LF("    if not (typeof(task) == %s and typeof(task[%s]) == %s) then return false end", _obfLitStr("table"), _obfLitStr("delay"), _obfLitStr("function"))
+    -- GetService calls: method name obfuscated via bracket notation.
+    LF("    local %s, %s = pcall(function() return game[%s](game,%s) end)", atCheckVars[11], atLighting, _obfLitStr("GetService"), _obfLitStr("Lighting"))
     LF("    if not %s then return false end", atCheckVars[11])
-    LF("    local %s = %s.ClockTime", atCheckVars[1], atLighting)
+    -- Read ClockTime via bracket notation so property name is hidden.
+    LF("    local %s = %s[%s]", atCheckVars[1], atLighting, _obfLitStr("ClockTime"))
     LF("    if type(%s) ~= %s then return false end", atCheckVars[1], _obfLitStr("number"))
     -- probeClockTime=13.75h (13:45); expected minutes=825 (13*60+45); inclusive tolerances absorb floating conversion/runtime variance.
     local probeClockExpr = string.format("((%s)/100)", _obfInt(1375))
@@ -1331,48 +1343,64 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     local probeMinutesTolExpr = string.format("(1/(%s))", _obfInt(10))
     LF("    local %s, %s, %s, %s = %s, %s, %s, %s", atCheckVars[6], atCheckVars[7], atCheckVars[8], atCheckVars[9], probeClockExpr, probeClockTolExpr, probeMinutesExpr, probeMinutesTolExpr)
     LF("    local %s, %s = pcall(function()", atCheckVars[2], atCheckVars[3])
-    LF("        %s.ClockTime = %s", atLighting, atCheckVars[6])
-    LF("        %s = %s.ClockTime", atCheckVars[4], atLighting)
-    LF("        %s = %s:GetMinutesAfterMidnight()", atCheckVars[5], atLighting)
+    LF("        %s[%s] = %s", atLighting, _obfLitStr("ClockTime"), atCheckVars[6])
+    LF("        %s = %s[%s]", atCheckVars[4], atLighting, _obfLitStr("ClockTime"))
+    LF("        %s = %s[%s](%s)", atCheckVars[5], atLighting, _obfLitStr("GetMinutesAfterMidnight"), atLighting)
     LF("    end)")
-    LF("    local %s = pcall(function() %s.ClockTime = %s end)", atCheckVars[10], atLighting, atCheckVars[1])
+    LF("    local %s = pcall(function() %s[%s] = %s end)", atCheckVars[10], atLighting, _obfLitStr("ClockTime"), atCheckVars[1])
     LF("    if not %s then return false end", atCheckVars[2])
     LF("    if not %s then return false end", atCheckVars[10])
     LF("    if type(%s) ~= %s or type(%s) ~= %s then return false end", atCheckVars[4], _obfLitStr("number"), atCheckVars[5], _obfLitStr("number"))
     -- Validate probe readback against expected ClockTime/minutes with inclusive thresholds.
     LF("    if not (math.abs(%s - %s) <= %s and math.abs(%s - %s) <= %s) then return false end", atCheckVars[4], atCheckVars[6], atCheckVars[7], atCheckVars[5], atCheckVars[8], atCheckVars[9])
     -- Workspace raycast integrity probe: ball top-surface hit must match expected Y position.
-    LF("    local %s, %s = pcall(function() return game:GetService(%s) end)", atCheckVars[12], atCheckVars[13], _obfLitStr("Workspace"))
+    LF("    local %s, %s = pcall(function() return game[%s](game,%s) end)", atCheckVars[12], atCheckVars[13], _obfLitStr("GetService"), _obfLitStr("Workspace"))
     LF("    if not %s then return false end", atCheckVars[12])
-    LF("    local %s = Instance.new(%s)", atCheckVars[14], _obfLitStr("Part"))
+    -- Instance.new via aliased constructor so "Instance" and "new" don't appear plaintext.
+    LF("    local %s = %s[%s](%s)", atCheckVars[14], atCheckVars[24], _obfLitStr("new"), _obfLitStr("Part"))
     LF("    local %s, %s = pcall(function()", atCheckVars[15], atCheckVars[16])
     local atPartSizeExpr = _obfInt(10)
     local atRayStartYExpr = _obfInt(10)
     local atRayDeltaYExpr = string.format("(-%s)", _obfInt(20))
     local atHalfExpr = string.format("(%s/(%s))", _obfInt(1), _obfInt(2))
     local atRayTolExpr = string.format("(1/(%s))", _obfInt(10))
-    LF("        %s.Size = Vector3.new(%s, %s, %s)", atCheckVars[14], atPartSizeExpr, atPartSizeExpr, atPartSizeExpr)
-    LF("        %s.Shape = Enum.PartType.Ball", atCheckVars[14])
-    LF("        %s.Anchored = true", atCheckVars[14])
-    LF("        %s.Parent = %s", atCheckVars[14], atCheckVars[13])
-    LF("        local %s = RaycastParams.new()", atCheckVars[17])
-    LF("        %s.FilterDescendantsInstances = {%s}", atCheckVars[17], atCheckVars[14])
-    LF("        %s.FilterType = Enum.RaycastFilterType.Include", atCheckVars[17])
-    LF("        local %s = %s:Raycast(%s.Position + Vector3.new(0, %s, 0), Vector3.new(0, %s, 0), %s)", atCheckVars[18], atCheckVars[13], atCheckVars[14], atRayStartYExpr, atRayDeltaYExpr, atCheckVars[17])
-    LF("        local %s = %s.Size.Y * %s", atCheckVars[22], atCheckVars[14], atHalfExpr)
-    LF("        return %s and math.abs(%s.Position.Y - (%s.Position.Y + %s)) <= %s", atCheckVars[18], atCheckVars[18], atCheckVars[14], atCheckVars[22], atRayTolExpr)
+    -- All property assignments use bracket notation; Vector3/Enum accessed via aliased vars.
+    LF("        %s[%s] = %s[%s](%s, %s, %s)", atCheckVars[14], _obfLitStr("Size"), atCheckVars[25], _obfLitStr("new"), atPartSizeExpr, atPartSizeExpr, atPartSizeExpr)
+    LF("        %s[%s] = %s[%s][%s]", atCheckVars[14], _obfLitStr("Shape"), atCheckVars[26], _obfLitStr("PartType"), _obfLitStr("Ball"))
+    LF("        %s[%s] = true", atCheckVars[14], _obfLitStr("Anchored"))
+    LF("        %s[%s] = %s", atCheckVars[14], _obfLitStr("Parent"), atCheckVars[13])
+    LF("        local %s = %s[%s]()", atCheckVars[17], atCheckVars[27], _obfLitStr("new"))
+    LF("        %s[%s] = {%s}", atCheckVars[17], _obfLitStr("FilterDescendantsInstances"), atCheckVars[14])
+    LF("        %s[%s] = %s[%s][%s]", atCheckVars[17], _obfLitStr("FilterType"), atCheckVars[26], _obfLitStr("RaycastFilterType"), _obfLitStr("Include"))
+    LF("        local %s = %s[%s](%s, %s[%s] + %s[%s](0, %s, 0), %s[%s](0, %s, 0), %s)",
+       atCheckVars[18],
+       atCheckVars[13], _obfLitStr("Raycast"),
+       atCheckVars[13],
+       atCheckVars[14], _obfLitStr("Position"),
+       atCheckVars[25], _obfLitStr("new"), atRayStartYExpr,
+       atCheckVars[25], _obfLitStr("new"), atRayDeltaYExpr,
+       atCheckVars[17])
+    LF("        local %s = %s[%s][%s] * %s", atCheckVars[22], atCheckVars[14], _obfLitStr("Size"), _obfLitStr("Y"), atHalfExpr)
+    LF("        return %s and math.abs(%s[%s][%s] - (%s[%s][%s] + %s)) <= %s",
+       atCheckVars[18],
+       atCheckVars[18], _obfLitStr("Position"), _obfLitStr("Y"),
+       atCheckVars[14], _obfLitStr("Position"), _obfLitStr("Y"),
+       atCheckVars[22], atRayTolExpr)
     LF("    end)")
-    LF("    pcall(function() %s:Destroy() end)", atCheckVars[14])
+    LF("    pcall(function() %s[%s](%s) end)", atCheckVars[14], _obfLitStr("Destroy"), atCheckVars[14])
     LF("    if not %s or not %s then return false end", atCheckVars[15], atCheckVars[16])
     -- Invalid-member probe: Luau should report invalid member on NUL-prefixed property access.
-    LF("    local %s = Instance.new(%s)", atCheckVars[19], _obfLitStr("Part"))
+    LF("    local %s = %s[%s](%s)", atCheckVars[19], atCheckVars[24], _obfLitStr("new"), _obfLitStr("Part"))
     LF("    local %s, %s = pcall(function() return %s[%s] end)", atCheckVars[20], atCheckVars[21], atCheckVars[19], _obfLitStr("\0Property"))
-    LF("    pcall(function() %s:Destroy() end)", atCheckVars[19])
+    LF("    pcall(function() %s[%s](%s) end)", atCheckVars[19], _obfLitStr("Destroy"), atCheckVars[19])
     LF("    if not ((not %s) and %s and tostring(%s):find(%s, 1, true)) then return false end", atCheckVars[20], atCheckVars[21], atCheckVars[21], _obfLitStr("valid member"))
     LF("    return true")
     LF("end)")
     LF("local %s = not (%s and %s)", atTrig, atOk, atChkVal)
-    LF("if %s then return end", atTrig)
+    LF("if %s then", atTrig)
+    LF("    print(%s)", _obfLitStr("Detected by catify :3"))
+    LF("    return")
+    LF("end")
 
     -- Watermark: obfuscated ASCII cat watermark (sits in memory, never printed)
     local wm_bytes = {32,32,47,92,95,47,92,32,32,10,32,40,111,46,111,32,41,10,32,32,62,32,94,32,60,10,32,67,97,116,105,102,121,32,118,50,46,48}
