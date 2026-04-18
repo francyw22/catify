@@ -614,6 +614,13 @@ end
 
 -- ─── Custom Base85 + RLE packer ──────────────────────────────────────────────
 local BASE85_ALPHA = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~"
+local BASE85_ENC = {}
+local BASE85_DEC = {}
+for i = 1, #BASE85_ALPHA do
+    local ch = BASE85_ALPHA:sub(i, i)
+    BASE85_ENC[i] = ch
+    BASE85_DEC[BASE85_ALPHA:byte(i)] = i - 1
+end
 
 local function _rle_pack(data)
     local out = {}
@@ -667,7 +674,7 @@ local function _rle_unpack(data)
 end
 
 local function _base85_enc_raw(data)
-    local alpha = BASE85_ALPHA
+    local enc = BASE85_ENC
     local out = {}
     for i = 1, #data, 4 do
         local rem = math.min(4, #data - i + 1)
@@ -681,45 +688,61 @@ local function _base85_enc_raw(data)
         local d3 = (v % 85) + 1; v = v // 85
         local d2 = (v % 85) + 1; v = v // 85
         local d1 = (v % 85) + 1
-        local nout = rem + 1
-        if nout >= 1 then out[#out + 1] = alpha:sub(d1, d1) end
-        if nout >= 2 then out[#out + 1] = alpha:sub(d2, d2) end
-        if nout >= 3 then out[#out + 1] = alpha:sub(d3, d3) end
-        if nout >= 4 then out[#out + 1] = alpha:sub(d4, d4) end
-        if nout >= 5 then out[#out + 1] = alpha:sub(d5, d5) end
+        local c1, c2, c3, c4, c5 = enc[d1], enc[d2], enc[d3], enc[d4], enc[d5]
+        if rem == 4 then
+            out[#out + 1] = c1 .. c2 .. c3 .. c4 .. c5
+        elseif rem == 3 then
+            out[#out + 1] = c1 .. c2 .. c3 .. c4
+        elseif rem == 2 then
+            out[#out + 1] = c1 .. c2 .. c3
+        else
+            out[#out + 1] = c1 .. c2
+        end
     end
     return table.concat(out)
 end
 
 local function _base85_dec_raw(data)
-    local alpha = BASE85_ALPHA
-    local decode = {}
-    for i = 1, #alpha do decode[alpha:byte(i)] = i - 1 end
+    local decode = BASE85_DEC
     local out = {}
     local i = 1
-    while i <= #data do
-        local rem = math.min(5, #data - i + 1)
-        local vals = {84, 84, 84, 84, 84}
-        for j = 1, rem do
-            local ch = data:byte(i + j - 1)
-            local dv = decode[ch]
-            if dv == nil then
-                error("Invalid Base85 character")
-            end
-            vals[j] = dv
+    local n = #data
+    while i <= n do
+        local rem = math.min(5, n - i + 1)
+        if rem == 1 then
+            error("Invalid Base85 length")
+        end
+        local v1 = decode[data:byte(i)]
+        local v2 = decode[data:byte(i + 1)]
+        if v1 == nil or v2 == nil then error("Invalid Base85 character") end
+        local v3, v4, v5 = 84, 84, 84
+        if rem >= 3 then
+            v3 = decode[data:byte(i + 2)]
+            if v3 == nil then error("Invalid Base85 character") end
+        end
+        if rem >= 4 then
+            v4 = decode[data:byte(i + 3)]
+            if v4 == nil then error("Invalid Base85 character") end
+        end
+        if rem == 5 then
+            v5 = decode[data:byte(i + 4)]
+            if v5 == nil then error("Invalid Base85 character") end
         end
         i = i + rem
-        local v = vals[1]
-        for j = 2, 5 do v = v * 85 + vals[j] end
+        local v = ((((v1 * 85 + v2) * 85 + v3) * 85 + v4) * 85 + v5)
         local b1 = (v >> 24) & 0xFF
         local b2 = (v >> 16) & 0xFF
         local b3 = (v >> 8) & 0xFF
         local b4 = v & 0xFF
-        local nout = rem - 1
-        if nout >= 1 then out[#out + 1] = string.char(b1) end
-        if nout >= 2 then out[#out + 1] = string.char(b2) end
-        if nout >= 3 then out[#out + 1] = string.char(b3) end
-        if nout >= 4 then out[#out + 1] = string.char(b4) end
+        if rem == 5 then
+            out[#out + 1] = string.char(b1, b2, b3, b4)
+        elseif rem == 4 then
+            out[#out + 1] = string.char(b1, b2, b3)
+        elseif rem == 3 then
+            out[#out + 1] = string.char(b1, b2)
+        else
+            out[#out + 1] = string.char(b1)
+        end
     end
     return table.concat(out)
 end
