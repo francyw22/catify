@@ -136,6 +136,22 @@ local function int_lit(n)
     return tostring(math.tointeger(n) or n)
 end
 
+-- Compact generated source by trimming line indentation/whitespace and joining
+-- non-empty lines into a single space-separated string.
+local function compact_source_lines(full)
+    local compact_lines = {}
+    for line in full:gmatch("[^\n]+") do
+        local trimmed = line:match("^%s*(.+)$")
+        if trimmed then
+            trimmed = trimmed:match("^(.-)%s*$")
+        end
+        if trimmed and trimmed ~= "" then
+            compact_lines[#compact_lines + 1] = trimmed
+        end
+    end
+    return table.concat(compact_lines, " ")
+end
+
 -- ─── VM Lua template (generated with random names at call time) ────────────────
 
 --- Generate the complete obfuscated Lua source for the given proto.
@@ -1447,20 +1463,9 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
 
     -- ── Compact post-processing: strip indentation and join lines ────────────
     local full = table.concat(src)
-    local compact_lines = {}
-    for line in full:gmatch("[^\n]+") do
-        -- Strip leading whitespace, then strip trailing whitespace separately
-        local trimmed = line:match("^%s*(.+)$")
-        if trimmed then
-            trimmed = trimmed:match("^(.-)%s*$")
-        end
-        if trimmed and trimmed ~= "" then
-            compact_lines[#compact_lines + 1] = trimmed
-        end
-    end
     -- Single-line header comment (matches the compact AstrarServices output style)
     local header = "-- This file was protected by Catify v2.0.0\n"
-    return header .. table.concat(compact_lines, " ")
+    return header .. compact_source_lines(full)
 end
 
 return VmGen
