@@ -199,7 +199,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     v.b91Out = vn()   -- output table
     v.b91P = vn()   -- p (decoded value) variable
     v.b91I = vn()   -- input parameter name
-    v.b85RleDec = vn() -- RLE decompressor for custom base85 payload
+    -- (b85RleDec is now merged into b91Dec – no separate name needed)
 
     -- Execute function params/locals
     v.eProto = vn()
@@ -719,60 +719,101 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("local function %s(_v) return string.char(%s(%s(_v,24),255),%s(%s(_v,16),255),%s(%s(_v,8),255),%s(_v,255)) end", v.wrU4be, v.bAnd, v.bShr, v.bAnd, v.bShr, v.bAnd, v.bShr, v.bAnd)
     -- Junk block at top of do-scope (dead computations, not reachable by any real code path)
     src[#src+1] = junk_block("", math.random(4, 8))
-    -- ── Real inline custom Base85 decoder + RLE unpacker ──
-    LF("local %s=%s", v.b91Alpha, _obfLitStr("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~"))
-    LF("local %s={}", v.b91Tbl)
-    LF("for _i=1,#%s do %s[%s:byte(_i)]=_i-1 end", v.b91Alpha, v.b91Tbl, v.b91Alpha)
-    LF("local function %s(%s)", v.b91Dec, v.b91I)
-    LF("  local %s={} local %s=1 local %s=17 local _q={84,84,84,84,84}", v.b91Out, v.b91B, v.b91V)
-    LF("  local _acc=0 local _v1,_v2,_v3,_v4")
-    LF("  while true do")
-    LF("    if %s==17 then", v.b91V)
-    LF("      if %s>#%s then break end", v.b91B, v.b91I)
-    LF("      _q[1],_q[2],_q[3],_q[4],_q[5]=84,84,84,84,84")
-    LF("      %s=math.min(5,#%s-%s+1)", v.b91N_, v.b91I, v.b91B)
-    LF("      %s=1", v.b91P)
-    LF("      %s=29", v.b91V)
-    LF("    elseif %s==29 then", v.b91V)
-    LF("      if %s<=%s then", v.b91P, v.b91N_)
-    LF("        local _ch=%s[%s:byte(%s+%s-1)]", v.b91Tbl, v.b91I, v.b91B, v.b91P)
-    LF("        if _ch==nil then error(%s,0) end", _obfLitStr("Catify: invalid Base85 payload"))
-    LF("        _q[%s]=_ch", v.b91P)
-    LF("        %s=%s+1", v.b91P, v.b91P)
-    LF("      else")
-    LF("        %s=%s+%s", v.b91B, v.b91B, v.b91N_)
-    LF("        %s=41", v.b91V)
-    LF("      end")
-    LF("    elseif %s==41 then", v.b91V)
-    LF("      _acc=_q[1]")
-    LF("      for _k=2,5 do _acc=_acc*85+_q[_k] end")
-    LF("      _v1=%s(%s(_acc,24),255)", v.bAnd, v.bShr)
-    LF("      _v2=%s(%s(_acc,16),255)", v.bAnd, v.bShr)
-    LF("      _v3=%s(%s(_acc,8),255)", v.bAnd, v.bShr)
-    LF("      _v4=%s(_acc,255)", v.bAnd)
-    LF("      if %s>1 then %s[#%s+1]=string.char(_v1) end", v.b91N_, v.b91Out, v.b91Out)
-    LF("      if %s>2 then %s[#%s+1]=string.char(_v2) end", v.b91N_, v.b91Out, v.b91Out)
-    LF("      if %s>3 then %s[#%s+1]=string.char(_v3) end", v.b91N_, v.b91Out, v.b91Out)
-    LF("      if %s>4 then %s[#%s+1]=string.char(_v4) end", v.b91N_, v.b91Out, v.b91Out)
-    LF("      %s=17", v.b91V)
-    LF("    end")
-    LF("  end")
-    LF("  return table.concat(%s) end", v.b91Out)
-    LF("local function %s(_s)", v.b85RleDec)
-    LF("  local _o={} local _i=1 local _st=11 local _n=0 local _t=0")
-    LF("  while true do")
-    LF("    if _st==11 then")
-    LF("      if _i>#_s then break end")
-    LF("      _t=_s:byte(_i) _i=_i+1")
-    LF("      if _t<128 then _n=_t+1 _st=22 else _n=_t-127 _st=33 end")
-    LF("    elseif _st==22 then")
-    LF("      _o[#_o+1]=_s:sub(_i,_i+_n-1) _i=_i+_n _st=11")
-    LF("    elseif _st==33 then")
-    LF("      _o[#_o+1]=string.rep(_s:sub(_i,_i),_n) _i=_i+1 _st=11")
-    LF("    end")
-    LF("  end")
-    LF("  return table.concat(_o)")
-    LF("end")
+    -- ── Combined Luraph-style B85+RLE chain decoder ─────────────────────────────
+    -- 8 distinct random state constants (per-build, hex/decimal mixed at emit time).
+    do
+        local _cUsed = {}
+        local function _cSt()
+            local sv
+            repeat sv = math.random(0x10, 0xFF) until not _cUsed[sv]
+            _cUsed[sv] = true
+            return sv
+        end
+        -- State semantics (values random per-build):
+        local CST_B85_CHK  = _cSt()   -- check if more B85 input
+        local CST_B85_FILL = _cSt()   -- fill one char into group
+        local CST_B85_EMIT = _cSt()   -- decode 5-char group to bytes
+        local CST_B85_DONE = _cSt()   -- B85 finished → begin RLE
+        local CST_RLE_CTRL = _cSt()   -- read RLE control byte
+        local CST_RLE_LIT  = _cSt()   -- literal-copy segment
+        local CST_RLE_RUN  = _cSt()   -- run-expand segment
+        local CST_CHAIN_END= _cSt()   -- done (break)
+
+        -- Format a state constant with visual variety (mix hex / decimal representations).
+        local function stL(sv)
+            local r = math.random(1, 5)
+            if     r == 1 then return string.format("0x%02X", sv)
+            elseif r == 2 then return string.format("0x%02x", sv)
+            elseif r == 3 then return tostring(sv)
+            elseif r == 4 then return string.format("(0x%X+0)", sv)
+            else                return string.format("0X%02X", sv)
+            end
+        end
+
+        LF("local %s=%s", v.b91Alpha, _obfLitStr("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~"))
+        LF("local %s={}", v.b91Tbl)
+        LF("for _i=1,#%s do %s[%s:byte(_i)]=_i-1 end", v.b91Alpha, v.b91Tbl, v.b91Alpha)
+        -- The chain function: one repeat…until false loop drives B85-decode then RLE-unpack.
+        -- State variable: %s (random name).  All internal temps use short _-prefixed names
+        -- to match the Luraph interpreter aesthetic (H/j/O/Q pattern).
+        LF("local function %s(%s)", v.b91Dec, v.b91I)
+        LF("  local %s=%s", v.b91V, stL(CST_B85_CHK))
+        LF("  local _j")                           -- general-purpose temp (visual noise)
+        LF("  local %s=1", v.b91B)                 -- B85 read cursor in payload
+        LF("  local %s={84,84,84,84,84}", v.b91Out) -- reuse b91Out as the B85 group buffer
+        LF("  local %s=0", v.b91N_)    -- B85 group size (0-5)
+        LF("  local %s=1", v.b91P)    -- B85 fill index
+        LF("  local _acc=0")          -- B85 group accumulator
+        LF("  local _rr={}")          -- B85 decoded bytes accumulator (table until B85_DONE, then string)
+        LF("  local _ri,_rc")         -- RLE: current position, current run/lit count
+        LF("  local _ro={}")          -- RLE output table
+        LF("  repeat")
+        -- STATE: B85_CHK — check if payload has more chars
+        LF("    if %s==%s then", v.b91V, stL(CST_B85_CHK))
+        LF("      if %s>#%s then %s=%s", v.b91B, v.b91I, v.b91V, stL(CST_B85_DONE))
+        LF("      else %s[1],%s[2],%s[3],%s[4],%s[5]=84,84,84,84,84", v.b91Out,v.b91Out,v.b91Out,v.b91Out,v.b91Out)
+        LF("        %s=math.min(5,#%s-%s+1);%s=1;%s=%s", v.b91N_, v.b91I, v.b91B, v.b91P, v.b91V, stL(CST_B85_FILL))
+        LF("      end")
+        -- STATE: B85_FILL — fill one char per iteration into the group buffer
+        LF("    elseif %s==%s then", v.b91V, stL(CST_B85_FILL))
+        LF("      if %s<=%s then", v.b91P, v.b91N_)
+        LF("        local _ch=%s[%s:byte(%s+%s-1)]", v.b91Tbl, v.b91I, v.b91B, v.b91P)
+        LF("        if _ch==nil then error(%s,0) end", _obfLitStr("Catify: invalid Base85 payload"))
+        LF("        %s[%s]=_ch;%s=%s+1", v.b91Out, v.b91P, v.b91P, v.b91P)
+        LF("      else %s=%s+%s;%s=%s end", v.b91B, v.b91B, v.b91N_, v.b91V, stL(CST_B85_EMIT))
+        -- STATE: B85_EMIT — decode the filled 5-char group into raw bytes
+        LF("    elseif %s==%s then", v.b91V, stL(CST_B85_EMIT))
+        LF("      _acc=%s[1];for _k=2,5 do _acc=_acc*85+%s[_k] end", v.b91Out, v.b91Out)
+        LF("      local _v1=%s(%s(_acc,%s),255)", v.bAnd, v.bShr, _obfInt(24))
+        LF("      local _v2=%s(%s(_acc,%s),255)", v.bAnd, v.bShr, _obfInt(16))
+        LF("      local _v3=%s(%s(_acc,%s),255)", v.bAnd, v.bShr, _obfInt(8))
+        LF("      local _v4=%s(_acc,255)", v.bAnd)
+        LF("      if %s>1 then _rr[#_rr+1]=string.char(_v1) end", v.b91N_)
+        LF("      if %s>2 then _rr[#_rr+1]=string.char(_v2) end", v.b91N_)
+        LF("      if %s>3 then _rr[#_rr+1]=string.char(_v3) end", v.b91N_)
+        LF("      if %s>4 then _rr[#_rr+1]=string.char(_v4) end", v.b91N_)
+        LF("      %s=%s", v.b91V, stL(CST_B85_CHK))
+        -- STATE: B85_DONE — B85 phase finished; initialise RLE phase
+        LF("    elseif %s==%s then", v.b91V, stL(CST_B85_DONE))
+        LF("      _j=table.concat(_rr);_rr=_j;_j=nil;_ri=1;_ro={};%s=%s", v.b91V, stL(CST_RLE_CTRL))
+        -- STATE: RLE_CTRL — read one RLE control byte; branch to lit or run
+        LF("    elseif %s==%s then", v.b91V, stL(CST_RLE_CTRL))
+        LF("      if _ri>#_rr then %s=%s", v.b91V, stL(CST_CHAIN_END))
+        LF("      else local _t=_rr:byte(_ri);_ri=_ri+1")
+        LF("        if _t<128 then _rc=_t+1;%s=%s else _rc=_t-127;%s=%s end", v.b91V, stL(CST_RLE_LIT), v.b91V, stL(CST_RLE_RUN))
+        LF("      end")
+        -- STATE: RLE_LIT — copy a literal segment verbatim
+        LF("    elseif %s==%s then", v.b91V, stL(CST_RLE_LIT))
+        LF("      _ro[#_ro+1]=_rr:sub(_ri,_ri+_rc-1);_ri=_ri+_rc;%s=%s", v.b91V, stL(CST_RLE_CTRL))
+        -- STATE: RLE_RUN — expand a run-length segment
+        LF("    elseif %s==%s then", v.b91V, stL(CST_RLE_RUN))
+        LF("      _ro[#_ro+1]=string.rep(_rr:sub(_ri,_ri),_rc);_ri=_ri+1;%s=%s", v.b91V, stL(CST_RLE_CTRL))
+        -- STATE: CHAIN_END — all phases done; exit loop
+        LF("    elseif %s==%s then break end", v.b91V, stL(CST_CHAIN_END))
+        LF("  until false")
+        LF("  return table.concat(_ro)")
+        LF("end")
+    end
     src[#src+1] = junk_block("", math.random(3, 6))
     -- ── Emit inline AES-256-CTR decrypt ─────────────────────────────────────
     -- S-box table literal
@@ -1310,7 +1351,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("  local _out={};for _i=1,8 do local _w=%s[_i];_out[_i]=%s(_w) end;return table.concat(_out)", v.shaH, v.wrU4be)
     LF("end")
     -- Decode custom Base85 payload + RLE expansion into v.vBlob (binary AES-encrypted blob)
-    LF("local %s=%s(%s(%s))", v.vBlob, v.b85RleDec, v.b91Dec, PAYLOAD_VAR_NAME)
+    LF("local %s=%s(%s)", v.vBlob, v.b91Dec, PAYLOAD_VAR_NAME)
     LF("%s=nil", PAYLOAD_VAR_NAME)   -- wipe payload after decoding
     -- SHA-256 integrity check: compute hash and compare exact bytes
     LF("local %s=%s(%s)", v.atSha, v.shaFn, v.vBlob)
@@ -1475,7 +1516,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
     LF("  %s=nil;%s=nil;%s=nil", v.vNp1, v.vNp2, v.nonceTbl)
     LF("end")
     LF("%s=%s(%s,%s,%s)", v.vBlob, v.vDecrypt, v.vBlob, v.vKey, v.vNonce)
-    LF("%s=nil;%s=nil;%s=nil;%s=nil;%s=nil;%s=nil;%s=nil", v.vKey, v.vNonce, v.vDecrypt, v.vDk1, v.vDk2, v.b91Dec, v.b85RleDec)   -- wipe key, nonce, decryptor, decoys, decoders
+    LF("%s=nil;%s=nil;%s=nil;%s=nil;%s=nil;%s=nil", v.vKey, v.vNonce, v.vDecrypt, v.vDk1, v.vDk2, v.b91Dec)   -- wipe key, nonce, decryptor, decoys, decoder
     LF("%s=1", v.dPos)
     LF("%s=%s", v.dData, v.vBlob)
     LF("local %s=%s()", v.vProto, v.vLoadProto)
