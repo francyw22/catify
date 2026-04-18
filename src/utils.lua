@@ -612,6 +612,132 @@ function Utils.sha256(data)
     return table.concat(out)
 end
 
+-- ─── Custom Base85 + RLE packer ──────────────────────────────────────────────
+local BASE85_ALPHA = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~"
+
+local function _rle_pack(data)
+    local out = {}
+    local i = 1
+    while i <= #data do
+        local b = data:byte(i)
+        local run = 1
+        while (i + run) <= #data and run < 128 and data:byte(i + run) == b do
+            run = run + 1
+        end
+        if run >= 3 then
+            out[#out + 1] = string.char(127 + run, b)
+            i = i + run
+        else
+            local start = i
+            local lit = 0
+            while i <= #data and lit < 128 do
+                b = data:byte(i)
+                run = 1
+                while (i + run) <= #data and run < 128 and data:byte(i + run) == b do
+                    run = run + 1
+                end
+                if run >= 3 then break end
+                i = i + 1
+                lit = lit + 1
+            end
+            out[#out + 1] = string.char(lit - 1) .. data:sub(start, start + lit - 1)
+        end
+    end
+    return table.concat(out)
+end
+
+local function _rle_unpack(data)
+    local out = {}
+    local i = 1
+    while i <= #data do
+        local t = data:byte(i)
+        i = i + 1
+        if t < 128 then
+            local n = t + 1
+            out[#out + 1] = data:sub(i, i + n - 1)
+            i = i + n
+        else
+            local n = t - 127
+            local b = data:sub(i, i)
+            i = i + 1
+            out[#out + 1] = string.rep(b, n)
+        end
+    end
+    return table.concat(out)
+end
+
+local function _base85_enc_raw(data)
+    local alpha = BASE85_ALPHA
+    local out = {}
+    for i = 1, #data, 4 do
+        local rem = math.min(4, #data - i + 1)
+        local b1 = data:byte(i) or 0
+        local b2 = data:byte(i + 1) or 0
+        local b3 = data:byte(i + 2) or 0
+        local b4 = data:byte(i + 3) or 0
+        local v = ((b1 << 24) | (b2 << 16) | (b3 << 8) | b4) & 0xFFFFFFFF
+        local d5 = (v % 85) + 1; v = v // 85
+        local d4 = (v % 85) + 1; v = v // 85
+        local d3 = (v % 85) + 1; v = v // 85
+        local d2 = (v % 85) + 1; v = v // 85
+        local d1 = (v % 85) + 1
+        local nout = rem + 1
+        if nout >= 1 then out[#out + 1] = alpha:sub(d1, d1) end
+        if nout >= 2 then out[#out + 1] = alpha:sub(d2, d2) end
+        if nout >= 3 then out[#out + 1] = alpha:sub(d3, d3) end
+        if nout >= 4 then out[#out + 1] = alpha:sub(d4, d4) end
+        if nout >= 5 then out[#out + 1] = alpha:sub(d5, d5) end
+    end
+    return table.concat(out)
+end
+
+local function _base85_dec_raw(data)
+    local alpha = BASE85_ALPHA
+    local decode = {}
+    for i = 1, #alpha do decode[alpha:byte(i)] = i - 1 end
+    local out = {}
+    local i = 1
+    while i <= #data do
+        local rem = math.min(5, #data - i + 1)
+        local vals = {84, 84, 84, 84, 84}
+        for j = 1, rem do
+            local ch = data:byte(i + j - 1)
+            local dv = decode[ch]
+            if dv == nil then
+                error("Invalid Base85 character")
+            end
+            vals[j] = dv
+        end
+        i = i + rem
+        local v = vals[1]
+        for j = 2, 5 do v = v * 85 + vals[j] end
+        local b1 = (v >> 24) & 0xFF
+        local b2 = (v >> 16) & 0xFF
+        local b3 = (v >> 8) & 0xFF
+        local b4 = v & 0xFF
+        local nout = rem - 1
+        if nout >= 1 then out[#out + 1] = string.char(b1) end
+        if nout >= 2 then out[#out + 1] = string.char(b2) end
+        if nout >= 3 then out[#out + 1] = string.char(b3) end
+        if nout >= 4 then out[#out + 1] = string.char(b4) end
+    end
+    return table.concat(out)
+end
+
+--- Custom payload packer: RLE-compress + Base85 encode
+---@param data string
+---@return string
+function Utils.base85_pack(data)
+    return _base85_enc_raw(_rle_pack(data))
+end
+
+--- Custom payload unpacker: Base85 decode + RLE-expand
+---@param data string
+---@return string
+function Utils.base85_unpack(data)
+    return _rle_unpack(_base85_dec_raw(data))
+end
+
 -- ─── Base91 ──────────────────────────────────────────────────────────────────
 local BASE91_ALPHA = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$%&()*+,./:;<=>?@[]^_`{|}~\""
 
