@@ -778,7 +778,7 @@ function VmGen.generate(proto, revmap, key, nonce, utils)
         LF("    elseif %s==%s then", v.b91V, stL(CST_B85_FILL))
         LF("      if %s<=%s then", v.b91P, v.b91N_)
         LF("        local _ch=%s[%s:byte(%s+%s-1)]", v.b91Tbl, v.b91I, v.b91B, v.b91P)
-        LF("        if _ch==nil then error(%s,0) end", _obfLitStr("Catify: invalid Base85 payload"))
+        LF("        if _ch==nil then break end")
         LF("        %s[%s]=_ch;%s=%s+1", v.b91Out, v.b91P, v.b91P, v.b91P)
         LF("      else %s=%s+%s;%s=%s end", v.b91B, v.b91B, v.b91N_, v.b91V, stL(CST_B85_EMIT))
         -- STATE: B85_EMIT — decode the filled 5-char group into raw bytes
